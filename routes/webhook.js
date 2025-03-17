@@ -22,25 +22,17 @@ const createOAuth2Client = (refreshToken) => {
 router.post('/create-event', async (req, res) => {
   const { 
     phoneNumber, 
-    appointmentDate, 
-    appointmentTime, 
+    startDateTime,  // Use the ISO format directly
     clientName,
-    clientPhone,
+    duration = 30,  // Default to 30 minutes if not specified
     service,
     notes
   } = req.body;
   
-  if (!phoneNumber) {
+  if (!phoneNumber || !startDateTime) {
     return res.status(400).json({ 
       success: false, 
-      error: 'Barber phone number is required' 
-    });
-  }
-  
-  if (!appointmentDate || !appointmentTime) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Appointment date and time are required' 
+      error: 'Phone number and start date-time are required' 
     });
   }
   
@@ -61,27 +53,11 @@ router.post('/create-event', async (req, res) => {
     // Create Calendar API client
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
     
-    // Parse appointment date and time
-    const [year, month, day] = appointmentDate.split('-').map(num => parseInt(num, 10));
-    const [hours, minutes] = appointmentTime.split(':').map(num => parseInt(num, 10));
+    // Parse the ISO date string to get start time
+    const startTime = new Date(startDateTime);
     
-    // Create event start and end times
-    // Note: Month in JavaScript Date is 0-indexed (0 = January)
-    const startTime = new Date(year, month - 1, day, hours, minutes);
-    
-    // Default duration: 1 hour, adjust as needed based on service
-    let duration = 60; // minutes
-    if (service === 'haircut') {
-      duration = 30;
-    } else if (service === 'hair coloring') {
-      duration = 120;
-    } else if (service === 'hair styling') {
-      duration = 60;
-    } else if (service === 'blowout') {
-      duration = 45;
-    }
-    
-    const endTime = new Date(startTime.getTime() + duration * 60000);
+    // Calculate end time based on duration (in minutes)
+    const endTime = new Date(startTime.getTime() + (duration * 60000));
     
     // Format as ISO strings for Google Calendar
     const startTimeIso = startTime.toISOString();
@@ -97,11 +73,11 @@ router.post('/create-event', async (req, res) => {
       description: notes || 'Booking via SMS',
       start: {
         dateTime: startTimeIso,
-        timeZone: 'America/Los_Angeles' // Adjust timezone as needed
+        timeZone: 'America/Los_Angeles'
       },
       end: {
         dateTime: endTimeIso,
-        timeZone: 'America/Los_Angeles' // Adjust timezone as needed
+        timeZone: 'America/Los_Angeles'
       }
     };
     

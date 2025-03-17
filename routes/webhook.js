@@ -18,21 +18,25 @@ const createOAuth2Client = (refreshToken) => {
   return oauth2Client;
 };
 
-// Zapier webhook endpoint to create calendar events
+// Main webhook endpoint to handle calendar operations
 router.post('/create-event', async (req, res) => {
   const { 
+    action = 'create', // Default action is create
     phoneNumber, 
-    startDateTime,  // Use the ISO format directly
+    startDateTime,
     clientName,
-    duration = 30,  // Default to 30 minutes if not specified
-    service,
-    notes
+    duration = 30,
+    service = 'Appointment',
+    notes,
+    eventId // Required for cancel/reschedule
   } = req.body;
   
-  if (!phoneNumber || !startDateTime) {
+  console.log('Webhook received:', { action, phoneNumber, startDateTime, clientName });
+  
+  if (!phoneNumber) {
     return res.status(400).json({ 
       success: false, 
-      error: 'Phone number and start date-time are required' 
+      error: 'Barber phone number is required' 
     });
   }
   
@@ -53,76 +57,213 @@ router.post('/create-event', async (req, res) => {
     // Create Calendar API client
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
     
-    // Parse the ISO date string to get start time
-    const startTime = new Date(startDateTime);
-    
-    // Calculate end time based on duration (in minutes)
-    const endTime = new Date(startTime.getTime() + (duration * 60000));
-    
-    // Format as ISO strings for Google Calendar
-    const startTimeIso = startTime.toISOString();
-    const endTimeIso = endTime.toISOString();
-    
-    // Prepare event details
-    const eventSummary = clientName 
-      ? `${service || 'Appointment'}: ${clientName}`
-      : `${service || 'Appointment'}`;
-      
-    const eventDetails = {
-      summary: eventSummary,
-      description: notes || 'Booking via SMS',
-      start: {
-        dateTime: startTimeIso,
-        timeZone: 'America/Los_Angeles'
-      },
-      end: {
-        dateTime: endTimeIso,
-        timeZone: 'America/Los_Angeles'
-      }
-    };
-    
-    // Create event in the selected calendar
+    // Get calendar ID
     const calendarId = barber.selected_calendar_id || 'primary';
-    const event = await calendar.events.insert({
-      calendarId: calendarId,
-      resource: eventDetails
-    });
     
-    // Store appointment in database
-    if (event.data && event.data.id) {
-      // Use client phone if provided, otherwise use a placeholder
-      const clientPhoneNumber = clientPhone || phoneNumber;
+    // Handle different actions
+    switch(action.toLowerCase()) {
+      case 'create':
+        return await handleCreateEvent(calendar, calendarId, req.body, barber, res);
       
-      // Store the appointment
-      await appointmentOps.create({
-        client_phone: clientPhoneNumber,
-        barber_id: barber.id,
-        service_type: service || 'appointment',
-        start_time: startTimeIso,
-        end_time: endTimeIso,
-        google_calendar_event_id: event.data.id,
-        notes: notes || ''
-      });
+      case 'cancel':
+        return await handleCancelEvent(calendar, calendarId, eventId, res);
+      
+      case 'reschedule':
+        return await handleRescheduleEvent(calendar, calendarId, eventId, req.body, res);
+      
+      default:
+        return res.status(400).json({
+          success: false,
+          error: `Unknown action: ${action}`
+        });
     }
-    
-    // Return success response
-    res.status(200).json({
-      success: true,
-      eventId: event.data.id,
-      eventLink: event.data.htmlLink,
-      message: 'Appointment added to calendar'
-    });
-    
   } catch (error) {
-    console.error('Create event error:', error);
+    console.error('Webhook processing error:', error);
     
-    // Return detailed error for debugging
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: error.message,
       details: error.response?.data || 'Unknown error'
     });
   }
 });
+
+// Helper function to create a new event
+async function handleCreateEvent(calendar, calendarId, data, barber, res) {
+  const { startDateTime, clientName, duration, service, notes } = data;
+  
+  if (!startDateTime) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Start date-time is required for creating events' 
+    });
+  }
+  
+  // Parse dates
+  const startTime = new Date(startDateTime);
+  const endTime = new Date(startTime.getTime() + (duration * 60000));
+  
+  // Format as ISO strings
+  const startTimeIso = startTime.toISOString();
+  const endTimeIso = endTime.toISOString();
+  
+  // Prepare event details
+  const eventSummary = clientName 
+    ? `${service}: ${clientName}`
+    : service;
+    
+  const eventDetails = {
+    summary: eventSummary,
+    description: notes || 'Booking via SMS',
+    start: {
+      dateTime: startTimeIso,
+      timeZone: 'America/Los_Angeles'
+    },
+    end: {
+      dateTime: endTimeIso,
+      timeZone: 'America/Los_Angeles'
+    }
+  };
+  
+  // Create event
+  const event = await calendar.events.insert({
+    calendarId: calendarId,
+    resource: eventDetails
+  });
+  
+  // Store appointment in database
+  if (event.data && event.data.id) {
+    // Use client's name if provided
+    await appointmentOps.create({
+      client_phone: clientName ? clientName : 'Unknown',
+      barber_id: barber.id,
+      service_type: service,
+      start_time: startTimeIso,
+      end_time: endTimeIso,
+      google_calendar_event_id: event.data.id,
+      notes: notes || ''
+    });
+  }
+  
+  // Return success response
+  return res.status(200).json({
+    success: true,
+    action: 'create',
+    eventId: event.data.id,
+    eventLink: event.data.htmlLink,
+    message: 'Appointment added to calendar'
+  });
+}
+
+// Helper function to cancel an event
+async function handleCancelEvent(calendar, calendarId, eventId, res) {
+  if (!eventId) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Event ID is required for cancelling events' 
+    });
+  }
+  
+  try {
+    // First try to find the event
+    await calendar.events.get({
+      calendarId: calendarId,
+      eventId: eventId
+    });
+    
+    // Event exists, delete it
+    await calendar.events.delete({
+      calendarId: calendarId,
+      eventId: eventId,
+      sendUpdates: 'all' // Send update notifications
+    });
+    
+    // Update appointment status in database
+    // This would typically update the 'status' field to 'cancelled'
+    // Implement database update logic here if needed
+    
+    return res.status(200).json({
+      success: true,
+      action: 'cancel',
+      message: 'Appointment successfully cancelled'
+    });
+  } catch (error) {
+    // Handle case where event doesn't exist
+    if (error.response && error.response.status === 404) {
+      return res.status(404).json({
+        success: false,
+        error: 'Event not found'
+      });
+    }
+    
+    throw error; // Re-throw for the main error handler
+  }
+}
+
+// Helper function to reschedule an event
+async function handleRescheduleEvent(calendar, calendarId, eventId, data, res) {
+  const { startDateTime, duration = 30 } = data;
+  
+  if (!eventId || !startDateTime) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Event ID and new start date-time are required for rescheduling' 
+    });
+  }
+  
+  try {
+    // First get the existing event
+    const existingEvent = await calendar.events.get({
+      calendarId: calendarId,
+      eventId: eventId
+    });
+    
+    // Parse new dates
+    const startTime = new Date(startDateTime);
+    const endTime = new Date(startTime.getTime() + (duration * 60000));
+    
+    // Prepare updated event details
+    const updatedEvent = {
+      ...existingEvent.data,
+      start: {
+        dateTime: startTime.toISOString(),
+        timeZone: 'America/Los_Angeles'
+      },
+      end: {
+        dateTime: endTime.toISOString(),
+        timeZone: 'America/Los_Angeles'
+      }
+    };
+    
+    // Update the event
+    const result = await calendar.events.update({
+      calendarId: calendarId,
+      eventId: eventId,
+      resource: updatedEvent,
+      sendUpdates: 'all' // Send update notifications
+    });
+    
+    // Update appointment in database
+    // Implement database update logic here if needed
+    
+    return res.status(200).json({
+      success: true,
+      action: 'reschedule',
+      eventId: result.data.id,
+      eventLink: result.data.htmlLink,
+      message: 'Appointment successfully rescheduled'
+    });
+  } catch (error) {
+    // Handle case where event doesn't exist
+    if (error.response && error.response.status === 404) {
+      return res.status(404).json({
+        success: false,
+        error: 'Event not found'
+      });
+    }
+    
+    throw error; // Re-throw for the main error handler
+  }
+}
 
 module.exports = router;

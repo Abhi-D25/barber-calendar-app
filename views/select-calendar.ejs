@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Select Calendar - Barber Calendar Integration</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/css/main.css" rel="stylesheet">
+</head>
+<body>
+  <div class="container">
+    <div class="row justify-content-center">
+      <div class="col-md-8 col-lg-6">
+        <div class="card">
+          <div class="card-body p-5">
+            <h1 class="text-center app-title mb-4">Select Calendar</h1>
+            
+            <p class="text-center mb-4">
+              Choose which calendar you'd like to use for your appointment bookings:
+            </p>
+            
+            <form action="/save-calendar" method="POST">
+              <input type="hidden" name="phoneNumber" value="<%= phoneNumber %>">
+              
+              <div class="calendars-container mb-4">
+                <% calendars.forEach(calendar => { %>
+                  <div class="calendar-option" data-calendar-id="<%= calendar.id %>">
+                    <div class="form-check">
+                      <input class="form-check-input" type="radio" name="calendarId" 
+                             id="calendar-<%= calendar.id %>" value="<%= calendar.id %>"
+                             <%= calendar.id === 'primary' ? 'checked' : '' %>>
+                      <label class="form-check-label w-100" for="calendar-<%= calendar.id %>">
+                        <div class="d-flex align-items-center">
+                          <svg class="icon" fill="currentColor" viewBox="0 0 16 16">
+                            <path d="M3.5 0a.5.5 0 0 1 .5.5V1h8V.5a.5.5 0 0 1 1 0V1h1a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h1V.5a.5.5 0 0 1 .5-.5zM1 4v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4H1z"/>
+                          </svg>
+                          <%= calendar.summary %>
+                          <% if (calendar.id === 'primary') { %>
+                            <span class="badge bg-primary ms-2">Default</span>
+                          <% } %>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
+                <% }); %>
+              </div>
+              
+              <div class="d-grid gap-2">
+                <button type="submit" class="btn btn-primary btn-lg">
+                  Save Calendar Preference
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    // Make entire calendar option clickable
+    document.querySelectorAll('.calendar-option').forEach(option => {
+      option.addEventListener('click', function() {
+        const radioInput = this.querySelector('input[type="radio"]');
+        radioInput.checked = true;
+        
+        // Update visual selection
+        document.querySelectorAll('.calendar-option').forEach(opt => {
+          opt.classList.remove('selected');
+        });
+        this.classList.add('selected');
+      });
+      
+      // Initialize selected state
+      const radioInput = option.querySelector('input[type="radio"]');
+      if (radioInput.checked) {
+        option.classList.add('selected');
+      }
+    });
+  </script>
+</body>
+</html>

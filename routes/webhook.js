@@ -109,8 +109,8 @@ async function handleCreateEvent(calendar, calendarId, data, barber, res) {
   
   // Prepare event details
   const eventSummary = clientName 
-    ? `${service}: ${clientName}`
-    : service;
+      ? `${service || 'Appointment'}: ${clientName}`
+      : `${service || 'Appointment'}`;
     
   const eventDetails = {
     summary: eventSummary,

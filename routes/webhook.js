@@ -188,25 +188,27 @@ router.post('/create-event', async (req, res) => {
 });
 
 // Helper function to create a new event
-function parseDateTimeWithTimezone(dateTimeString) {
-  // Check if string already contains timezone info
-  if (dateTimeString.includes('Z') || 
-      dateTimeString.includes('+') || 
-      dateTimeString.includes('-') && dateTimeString.length > 19) {
-    // Already has timezone info, parse as is
-    return new Date(dateTimeString);
-  }
+function parsePacificDateTime(dateTimeString) {
+  // Extract date parts from the string
+  const match = dateTimeString.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/);
   
-  // No timezone info, assume it's in Pacific time
-  // Create Date object with the assumption that the time is in Pacific timezone
-  const date = new Date(dateTimeString);
-  
-  // Check if date is valid
-  if (isNaN(date.getTime())) {
+  if (!match) {
     throw new Error(`Invalid date format: ${dateTimeString}`);
   }
   
-  // Return the date object
+  const [_, year, month, day, hour, minute, second] = match;
+  
+  // Create a date object with explicit Pacific time values
+  // Note: This creates the date in UTC, so we need to adjust for Pacific timezone
+  const date = new Date(Date.UTC(
+    parseInt(year, 10),
+    parseInt(month, 10) - 1,  // Months are 0-indexed
+    parseInt(day, 10),
+    parseInt(hour, 10) + 7,  // Add 7 hours to convert from Pacific to UTC
+    parseInt(minute, 10),
+    parseInt(second, 10)
+  ));
+  
   return date;
 }
 
@@ -222,7 +224,7 @@ async function handleCreateEvent(calendar, calendarId, data, barber, res) {
   }
   
   // Parse dates with timezone handling
-  const startTime = parseDateTimeWithTimezone(startDateTime);
+  const startTime = parsePacificDateTime(startDateTime);
   const endTime = new Date(startTime.getTime() + (duration * 60000));
   
   // Format as ISO strings
@@ -417,7 +419,7 @@ async function handleRescheduleEvent(calendar, calendarId, eventId, data, res) {
       }
     }
     
-    const startTime = parseDateTimeWithTimezone(startDateTime);
+    const startTime = parsePacificDateTime(startDateTime);
     const endTime = new Date(startTime.getTime() + (duration * 60000));
     
     // Prepare updated event details - keep everything except the times

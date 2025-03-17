@@ -18,6 +18,43 @@ const createOAuth2Client = (refreshToken) => {
   return oauth2Client;
 };
 
+// Find event by client name and approximate date
+async function findEventByClientName(calendar, calendarId, clientName, appointmentDate) {
+  // Default search window if no date provided: 2 weeks from now
+  let timeMin, timeMax;
+  
+  if (appointmentDate) {
+    // Search window: 24 hours before and after the appointment date
+    timeMin = new Date(appointmentDate);
+    timeMin.setHours(timeMin.getHours() - 24);
+    
+    timeMax = new Date(appointmentDate);
+    timeMax.setHours(timeMax.getHours() + 24);
+  } else {
+    // If no date hint, search from today to 2 weeks ahead
+    timeMin = new Date();
+    timeMax = new Date();
+    timeMax.setDate(timeMax.getDate() + 14);
+  }
+  
+  console.log(`Searching for event with client: ${clientName}, between ${timeMin.toISOString()} and ${timeMax.toISOString()}`);
+  
+  // Search for events containing the client name
+  const response = await calendar.events.list({
+    calendarId: calendarId,
+    timeMin: timeMin.toISOString(),
+    timeMax: timeMax.toISOString(),
+    q: clientName,  // Search text
+    singleEvents: true,
+    orderBy: 'startTime'
+  });
+  
+  console.log(`Found ${response.data.items.length} potential matching events`);
+  
+  // Return the first matching event, or null if none found
+  return response.data.items.length > 0 ? response.data.items[0] : null;
+}
+
 // Main webhook endpoint to handle calendar operations
 router.post('/create-event', async (req, res) => {
   const { 
@@ -28,10 +65,10 @@ router.post('/create-event', async (req, res) => {
     duration = 30,
     service = 'Appointment',
     notes,
-    eventId // Required for cancel/reschedule
+    eventId // Optional - can be found by client name if not provided
   } = req.body;
   
-  console.log('Webhook received:', { action, phoneNumber, startDateTime, clientName });
+  console.log('Webhook received:', { action, phoneNumber, clientName, startDateTime });
   
   if (!phoneNumber) {
     return res.status(400).json({ 
@@ -66,7 +103,7 @@ router.post('/create-event', async (req, res) => {
         return await handleCreateEvent(calendar, calendarId, req.body, barber, res);
       
       case 'cancel':
-        return await handleCancelEvent(calendar, calendarId, eventId, res);
+        return await handleCancelEvent(calendar, calendarId, eventId, clientName, startDateTime, res);
       
       case 'reschedule':
         return await handleRescheduleEvent(calendar, calendarId, eventId, req.body, res);
@@ -109,8 +146,8 @@ async function handleCreateEvent(calendar, calendarId, data, barber, res) {
   
   // Prepare event details
   const eventSummary = clientName 
-      ? `${service || 'Appointment'}: ${clientName}`
-      : `${service || 'Appointment'}`;
+    ? `${service}: ${clientName}`
+    : service;
     
   const eventDetails = {
     summary: eventSummary,
@@ -128,21 +165,29 @@ async function handleCreateEvent(calendar, calendarId, data, barber, res) {
   // Create event
   const event = await calendar.events.insert({
     calendarId: calendarId,
-    resource: eventDetails
+    resource: eventDetails,
+    sendUpdates: 'all'
   });
   
   // Store appointment in database
   if (event.data && event.data.id) {
-    // Use client's name if provided
-    await appointmentOps.create({
-      client_phone: clientName ? clientName : 'Unknown',
-      barber_id: barber.id,
-      service_type: service,
-      start_time: startTimeIso,
-      end_time: endTimeIso,
-      google_calendar_event_id: event.data.id,
-      notes: notes || ''
-    });
+    try {
+      // Use client's name if provided, otherwise use "Unknown"
+      const clientPhoneOrName = clientName || 'Unknown Client';
+      
+      await appointmentOps.create({
+        client_phone: clientPhoneOrName,
+        barber_id: barber.id,
+        service_type: service,
+        start_time: startTimeIso,
+        end_time: endTimeIso,
+        google_calendar_event_id: event.data.id,
+        notes: notes || ''
+      });
+    } catch (dbError) {
+      console.error('Error storing appointment in database:', dbError);
+      // Continue anyway since the calendar event was created
+    }
   }
   
   // Return success response
@@ -156,20 +201,53 @@ async function handleCreateEvent(calendar, calendarId, data, barber, res) {
 }
 
 // Helper function to cancel an event
-async function handleCancelEvent(calendar, calendarId, eventId, res) {
-  if (!eventId) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Event ID is required for cancelling events' 
-    });
-  }
-  
+async function handleCancelEvent(calendar, calendarId, eventId, clientName, startDateTime, res) {
   try {
-    // First try to find the event
-    await calendar.events.get({
-      calendarId: calendarId,
-      eventId: eventId
-    });
+    // If no eventId is provided, try to find by client name
+    let eventToCancel = null;
+    
+    if (!eventId) {
+      if (!clientName) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Either event ID or client name is required for cancelling events' 
+        });
+      }
+      
+      // Try to find the event by client name
+      eventToCancel = await findEventByClientName(
+        calendar, 
+        calendarId, 
+        clientName, 
+        startDateTime ? new Date(startDateTime) : null
+      );
+      
+      if (!eventToCancel) {
+        return res.status(404).json({
+          success: false,
+          error: `No matching event found for client "${clientName}"`
+        });
+      }
+      
+      eventId = eventToCancel.id;
+      console.log(`Found event to cancel: ${eventId} (${eventToCancel.summary})`);
+    } else {
+      // Verify the event exists
+      try {
+        eventToCancel = await calendar.events.get({
+          calendarId: calendarId,
+          eventId: eventId
+        });
+      } catch (getErr) {
+        if (getErr.response && getErr.response.status === 404) {
+          return res.status(404).json({
+            success: false,
+            error: 'Event not found with the provided ID'
+          });
+        }
+        throw getErr;
+      }
+    }
     
     // Event exists, delete it
     await calendar.events.delete({
@@ -178,51 +256,87 @@ async function handleCancelEvent(calendar, calendarId, eventId, res) {
       sendUpdates: 'all' // Send update notifications
     });
     
-    // Update appointment status in database
-    // This would typically update the 'status' field to 'cancelled'
-    // Implement database update logic here if needed
+    // Update appointment status in database if needed
+    // Implement database update logic here
     
     return res.status(200).json({
       success: true,
       action: 'cancel',
+      eventId: eventId,
       message: 'Appointment successfully cancelled'
     });
   } catch (error) {
-    // Handle case where event doesn't exist
-    if (error.response && error.response.status === 404) {
-      return res.status(404).json({
-        success: false,
-        error: 'Event not found'
-      });
-    }
+    console.error('Error cancelling event:', error);
     
-    throw error; // Re-throw for the main error handler
+    // Re-throw for the main error handler
+    throw error;
   }
 }
 
 // Helper function to reschedule an event
 async function handleRescheduleEvent(calendar, calendarId, eventId, data, res) {
-  const { startDateTime, duration = 30 } = data;
+  const { startDateTime, clientName, duration = 30 } = data;
   
-  if (!eventId || !startDateTime) {
+  if (!startDateTime) {
     return res.status(400).json({ 
       success: false, 
-      error: 'Event ID and new start date-time are required for rescheduling' 
+      error: 'New start date-time is required for rescheduling' 
     });
   }
   
   try {
-    // First get the existing event
-    const existingEvent = await calendar.events.get({
-      calendarId: calendarId,
-      eventId: eventId
-    });
+    // If no eventId is provided, try to find by client name
+    let existingEvent;
+    
+    if (!eventId) {
+      if (!clientName) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Either event ID or client name is required for rescheduling' 
+        });
+      }
+      
+      // Try to find the event by client name
+      const foundEvent = await findEventByClientName(
+        calendar, 
+        calendarId, 
+        clientName, 
+        null // Don't use startDateTime for search as we're changing it
+      );
+      
+      if (!foundEvent) {
+        return res.status(404).json({
+          success: false,
+          error: `No matching event found for client "${clientName}"`
+        });
+      }
+      
+      eventId = foundEvent.id;
+      existingEvent = { data: foundEvent };
+      console.log(`Found event to reschedule: ${eventId} (${foundEvent.summary})`);
+    } else {
+      // Get the existing event details
+      try {
+        existingEvent = await calendar.events.get({
+          calendarId: calendarId,
+          eventId: eventId
+        });
+      } catch (getErr) {
+        if (getErr.response && getErr.response.status === 404) {
+          return res.status(404).json({
+            success: false,
+            error: 'Event not found with the provided ID'
+          });
+        }
+        throw getErr;
+      }
+    }
     
     // Parse new dates
     const startTime = new Date(startDateTime);
     const endTime = new Date(startTime.getTime() + (duration * 60000));
     
-    // Prepare updated event details
+    // Prepare updated event details - keep everything except the times
     const updatedEvent = {
       ...existingEvent.data,
       start: {
@@ -243,8 +357,8 @@ async function handleRescheduleEvent(calendar, calendarId, eventId, data, res) {
       sendUpdates: 'all' // Send update notifications
     });
     
-    // Update appointment in database
-    // Implement database update logic here if needed
+    // Update appointment in database if needed
+    // Implement database update logic here
     
     return res.status(200).json({
       success: true,
@@ -254,14 +368,7 @@ async function handleRescheduleEvent(calendar, calendarId, eventId, data, res) {
       message: 'Appointment successfully rescheduled'
     });
   } catch (error) {
-    // Handle case where event doesn't exist
-    if (error.response && error.response.status === 404) {
-      return res.status(404).json({
-        success: false,
-        error: 'Event not found'
-      });
-    }
-    
+    console.error('Error rescheduling event:', error);
     throw error; // Re-throw for the main error handler
   }
 }

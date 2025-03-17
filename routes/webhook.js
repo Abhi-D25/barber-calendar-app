@@ -20,39 +20,101 @@ const createOAuth2Client = (refreshToken) => {
 
 // Find event by client name and approximate date
 async function findEventByClientName(calendar, calendarId, clientName, appointmentDate) {
-  // Default search window if no date provided: 2 weeks from now
-  let timeMin, timeMax;
+  // Use a wider search window: 30 days before and after the current date
+  const timeMin = new Date();
+  timeMin.setDate(timeMin.getDate() - 30); // Look back 30 days
   
-  if (appointmentDate) {
-    // Search window: 24 hours before and after the appointment date
-    timeMin = new Date(appointmentDate);
-    timeMin.setHours(timeMin.getHours() - 24);
-    
-    timeMax = new Date(appointmentDate);
-    timeMax.setHours(timeMax.getHours() + 24);
-  } else {
-    // If no date hint, search from today to 2 weeks ahead
-    timeMin = new Date();
-    timeMax = new Date();
-    timeMax.setDate(timeMax.getDate() + 14);
-  }
+  const timeMax = new Date();
+  timeMax.setDate(timeMax.getDate() + 60); // Look ahead 60 days
   
-  console.log(`Searching for event with client: ${clientName}, between ${timeMin.toISOString()} and ${timeMax.toISOString()}`);
+  console.log(`Searching for events with client: "${clientName}", between ${timeMin.toISOString()} and ${timeMax.toISOString()}`);
   
-  // Search for events containing the client name
+  // Get all events in the date range
   const response = await calendar.events.list({
     calendarId: calendarId,
     timeMin: timeMin.toISOString(),
     timeMax: timeMax.toISOString(),
-    q: clientName,  // Search text
     singleEvents: true,
-    orderBy: 'startTime'
+    orderBy: 'startTime',
+    maxResults: 100 // Get a reasonable number of events
   });
   
-  console.log(`Found ${response.data.items.length} potential matching events`);
+  console.log(`Found ${response.data.items.length} total events in calendar`);
   
-  // Return the first matching event, or null if none found
-  return response.data.items.length > 0 ? response.data.items[0] : null;
+  // Create normalized client name for more flexible matching
+  const normalizedSearchName = clientName.toLowerCase().trim();
+  
+  // Filter events that might contain the client name
+  const matchingEvents = response.data.items.filter(event => {
+    // Check the summary (title)
+    const summary = (event.summary || '').toLowerCase();
+    
+    // Check the description
+    const description = (event.description || '').toLowerCase();
+    
+    // Look for the client name in either field
+    return summary.includes(normalizedSearchName) || 
+           description.includes(normalizedSearchName);
+  });
+  
+  console.log(`Found ${matchingEvents.length} potential matches for "${clientName}"`);
+  
+  if (matchingEvents.length === 0) {
+    // No matches found
+    return null;
+  }
+  
+  if (matchingEvents.length === 1) {
+    // Only one match, return it
+    return matchingEvents[0];
+  }
+  
+  // Multiple matches - if we have a date hint, use it to find the closest match
+  if (appointmentDate) {
+    const targetDate = new Date(appointmentDate);
+    
+    // Sort by closest to the target date
+    matchingEvents.sort((a, b) => {
+      const dateA = new Date(a.start.dateTime || a.start.date);
+      const dateB = new Date(b.start.dateTime || b.start.date);
+      
+      const diffA = Math.abs(dateA - targetDate);
+      const diffB = Math.abs(dateB - targetDate);
+      
+      return diffA - diffB;
+    });
+    
+    // Return the closest match
+    return matchingEvents[0];
+  }
+  
+  // If no date hint, return the next upcoming event for this client
+  const now = new Date();
+  const upcomingEvents = matchingEvents.filter(event => {
+    const eventDate = new Date(event.start.dateTime || event.start.date);
+    return eventDate >= now;
+  });
+  
+  if (upcomingEvents.length > 0) {
+    // Sort by date (ascending)
+    upcomingEvents.sort((a, b) => {
+      const dateA = new Date(a.start.dateTime || a.start.date);
+      const dateB = new Date(b.start.dateTime || b.start.date);
+      return dateA - dateB;
+    });
+    
+    // Return the next upcoming event
+    return upcomingEvents[0];
+  }
+  
+  // If no upcoming events, return the most recent past event
+  matchingEvents.sort((a, b) => {
+    const dateA = new Date(a.start.dateTime || a.start.date);
+    const dateB = new Date(b.start.dateTime || b.start.date);
+    return dateB - dateA; // Descending order
+  });
+  
+  return matchingEvents[0];
 }
 
 // Main webhook endpoint to handle calendar operations

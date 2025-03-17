@@ -188,6 +188,29 @@ router.post('/create-event', async (req, res) => {
 });
 
 // Helper function to create a new event
+function parseDateTimeWithTimezone(dateTimeString) {
+  // Check if string already contains timezone info
+  if (dateTimeString.includes('Z') || 
+      dateTimeString.includes('+') || 
+      dateTimeString.includes('-') && dateTimeString.length > 19) {
+    // Already has timezone info, parse as is
+    return new Date(dateTimeString);
+  }
+  
+  // No timezone info, assume it's in Pacific time
+  // Create Date object with the assumption that the time is in Pacific timezone
+  const date = new Date(dateTimeString);
+  
+  // Check if date is valid
+  if (isNaN(date.getTime())) {
+    throw new Error(`Invalid date format: ${dateTimeString}`);
+  }
+  
+  // Return the date object
+  return date;
+}
+
+// Modify in handleCreateEvent function
 async function handleCreateEvent(calendar, calendarId, data, barber, res) {
   const { startDateTime, clientName, duration, service, notes } = data;
   
@@ -198,8 +221,8 @@ async function handleCreateEvent(calendar, calendarId, data, barber, res) {
     });
   }
   
-  // Parse dates
-  const startTime = new Date(startDateTime);
+  // Parse dates with timezone handling
+  const startTime = parseDateTimeWithTimezone(startDateTime);
   const endTime = new Date(startTime.getTime() + (duration * 60000));
   
   // Format as ISO strings
@@ -208,15 +231,15 @@ async function handleCreateEvent(calendar, calendarId, data, barber, res) {
   
   // Prepare event details
   const eventSummary = clientName 
-      ? `${service || 'Appointment'}: ${clientName}`
-      : `${service || 'Appointment'}`;
+    ? `${service}: ${clientName}`
+    : service;
     
   const eventDetails = {
     summary: eventSummary,
     description: notes || 'Booking via SMS',
     start: {
       dateTime: startTimeIso,
-      timeZone: 'America/Los_Angeles'
+      timeZone: 'America/Los_Angeles' // Explicitly set timezone for Google Calendar
     },
     end: {
       dateTime: endTimeIso,
@@ -394,8 +417,7 @@ async function handleRescheduleEvent(calendar, calendarId, eventId, data, res) {
       }
     }
     
-    // Parse new dates
-    const startTime = new Date(startDateTime);
+    const startTime = parseDateTimeWithTimezone(startDateTime);
     const endTime = new Date(startTime.getTime() + (duration * 60000));
     
     // Prepare updated event details - keep everything except the times

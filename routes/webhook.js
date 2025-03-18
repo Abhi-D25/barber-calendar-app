@@ -189,17 +189,38 @@ router.post('/create-event', async (req, res) => {
 
 // Add this new endpoint for client-initiated appointments
 router.post('/client-appointment', async (req, res) => {
-  const {
+  let {
     clientPhone,
-    clientName,
-    serviceType = 'Haircut',
+    clientName = "New Client",
+    serviceType = 'Appointment',
     startDateTime,
+    newStartDateTime, // For rescheduling
     duration = 30,
     notes = '',
-    preferredBarberId // Optional: if not provided, we'll use the one from the DB
+    preferredBarberId,
+    isCancelling = false,
+    isRescheduling = false,
+    eventId // Optional for cancel/reschedule
   } = req.body;
 
-  console.log('Client appointment webhook received:', { clientPhone, clientName, serviceType, startDateTime });
+  // Convert boolean strings to actual booleans if needed
+  if (typeof isCancelling === 'string') {
+    isCancelling = isCancelling.toLowerCase() === 'true';
+  }
+  if (typeof isRescheduling === 'string') {
+    isRescheduling = isRescheduling.toLowerCase() === 'true';
+  }
+  
+  // Convert duration to number if it's a string
+  if (typeof duration === 'string') {
+    duration = parseInt(duration, 10) || 30;
+  }
+
+  console.log('Client appointment webhook received:', { 
+    clientPhone, clientName, serviceType, startDateTime, 
+    newStartDateTime, duration, preferredBarberId,
+    isCancelling, isRescheduling, eventId
+  });
 
   if (!clientPhone) {
     return res.status(400).json({
@@ -208,36 +229,37 @@ router.post('/client-appointment', async (req, res) => {
     });
   }
 
-  if (!startDateTime) {
-    return res.status(400).json({
-      success: false,
-      error: 'Start date-time is required'
-    });
-  }
-
   try {
     // Get client details from the database
-    console.log('Looking up client with phone number:', clientPhone);
-    const client = await clientOps.getByPhoneNumber(clientPhone);
+    let client = await clientOps.getByPhoneNumber(clientPhone);
     
-    console.log('Client lookup result:', client);
-    
-    if (!client) {
-      return res.status(404).json({
-        success: false,
-        error: 'Client not found'
-      });
+    // If client doesn't exist, create a new one (for new appointments only)
+    if (!client && !isCancelling && preferredBarberId) {
+      console.log(`Client ${clientPhone} not found, creating new entry`);
+      const newClient = {
+        phone_number: clientPhone,
+        name: clientName,
+        preferred_barber_id: preferredBarberId
+      };
+      
+      try {
+        client = await clientOps.createOrUpdate(newClient);
+        console.log('Created new client:', client);
+      } catch (createErr) {
+        console.error('Error creating client:', createErr);
+      }
     }
-
-    // Determine which barber to use
-    let barberId = preferredBarberId || (client.preferred_barber ? client.preferred_barber.id : null);
     
-    if (!barberId) {
+    // Determine which barber to use
+    if (!preferredBarberId && (!client || !client.preferred_barber_id)) {
       return res.status(400).json({
         success: false,
         error: 'No barber specified and client has no preferred barber'
       });
     }
+    
+    // Use provided barber ID or client's preferred barber
+    let barberId = preferredBarberId || (client ? client.preferred_barber_id : null);
 
     // Get barber details from the database
     const { data: barber, error: barberError } = await supabase
@@ -249,7 +271,8 @@ router.post('/client-appointment', async (req, res) => {
     if (barberError || !barber || !barber.refresh_token) {
       return res.status(404).json({
         success: false,
-        error: 'Barber not found or not authorized'
+        error: 'Barber not found or not authorized',
+        details: barberError
       });
     }
 
@@ -262,84 +285,326 @@ router.post('/client-appointment', async (req, res) => {
     // Get calendar ID
     const calendarId = barber.selected_calendar_id || 'primary';
 
-    // Parse dates with timezone handling
-    const startTime = parsePacificDateTime(startDateTime);
-    const endTime = new Date(startTime.getTime() + (duration * 60000));
-    
-    // Format as ISO strings
-    const startTimeIso = startTime.toISOString();
-    const endTimeIso = endTime.toISOString();
-    
-    // Prepare event details
-    const eventSummary = clientName 
-      ? `${serviceType}: ${clientName}`
-      : `${serviceType}: ${client.phone_number}`;
-      
-    const eventDetails = {
-      summary: eventSummary,
-      description: `Client: ${clientName || client.phone_number}\nPhone: ${clientPhone}\n${notes || ''}`,
-      start: {
-        dateTime: startTimeIso,
-        timeZone: 'America/Los_Angeles'
-      },
-      end: {
-        dateTime: endTimeIso,
-        timeZone: 'America/Los_Angeles'
-      }
-    };
-    
-    // Create event
-    const event = await calendar.events.insert({
-      calendarId: calendarId,
-      resource: eventDetails,
-      sendUpdates: 'all'
-    });
-    
-    // Store appointment in database
-    if (event.data && event.data.id) {
-      try {
-        await appointmentOps.create({
-          client_phone: clientPhone,
-          barber_id: barberId,
-          service_type: serviceType,
-          start_time: startTimeIso,
-          end_time: endTimeIso,
-          google_calendar_event_id: event.data.id,
-          notes: notes || ''
-        });
-      } catch (dbError) {
-        console.error('Error storing appointment in database:', dbError);
-        // Continue anyway since the calendar event was created
-      }
+    // Handle different operations based on flags
+    if (isCancelling) {
+      // Handle cancellation
+      return await handleCancelClientAppointment(
+        calendar, 
+        calendarId, 
+        eventId, 
+        clientName || client?.name, 
+        clientPhone,
+        startDateTime, 
+        res
+      );
+    } else if (isRescheduling) {
+      // Handle rescheduling
+      return await handleRescheduleClientAppointment(
+        calendar, 
+        calendarId, 
+        eventId,
+        clientName || client?.name,
+        clientPhone, 
+        startDateTime,
+        newStartDateTime || startDateTime, 
+        duration,
+        res
+      );
+    } else {
+      // Handle creation (default)
+      return await handleCreateClientAppointment(
+        calendar, 
+        calendarId, 
+        {
+          clientPhone,
+          clientName: clientName || (client ? client.name : 'New Client'),
+          serviceType,
+          startDateTime,
+          duration,
+          notes,
+          barberId: barber.id
+        }, 
+        res
+      );
     }
-    
-    // Return success response
-    return res.status(200).json({
-      success: true,
-      action: 'create',
-      eventId: event.data.id,
-      eventLink: event.data.htmlLink,
-      barberName: barber.name,
-      appointmentTime: startTimeIso,
-      message: 'Appointment added to calendar'
-    });
-
   } catch (error) {
     console.error('Client appointment processing error:', error);
-    // More detailed error logging
-    if (error.response) {
-      console.error('Error response data:', error.response.data);
-      console.error('Error response status:', error.response.status);
-    }
     
     return res.status(500).json({
       success: false,
       error: error.message,
-      stack: error.stack, // Add stack trace for debugging
+      stack: error.stack,
       details: error.response?.data || 'Unknown error'
     });
   }
 });
+
+async function handleCreateClientAppointment(calendar, calendarId, data, res) {
+  const { clientPhone, clientName, serviceType, startDateTime, duration, notes, barberId } = data;
+  
+  if (!startDateTime) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Start date-time is required for creating appointments' 
+    });
+  }
+  
+  // Parse dates with timezone handling
+  const startTime = parsePacificDateTime(startDateTime);
+  const endTime = new Date(startTime.getTime() + (duration * 60000));
+  
+  // Format as ISO strings
+  const startTimeIso = startTime.toISOString();
+  const endTimeIso = endTime.toISOString();
+  
+  // Prepare event details
+  const eventSummary = clientName 
+    ? `${serviceType}: ${clientName}`
+    : serviceType;
+    
+  const eventDetails = {
+    summary: eventSummary,
+    description: `Client: ${clientName}\nPhone: ${clientPhone}\n${notes || ''}`,
+    start: {
+      dateTime: startTimeIso,
+      timeZone: 'America/Los_Angeles'
+    },
+    end: {
+      dateTime: endTimeIso,
+      timeZone: 'America/Los_Angeles'
+    }
+  };
+  
+  // Create event
+  const event = await calendar.events.insert({
+    calendarId: calendarId,
+    resource: eventDetails,
+    sendUpdates: 'all'
+  });
+  
+  // Store appointment in database
+  if (event.data && event.data.id) {
+    try {
+      await appointmentOps.create({
+        client_phone: clientPhone,
+        barber_id: barberId,
+        service_type: serviceType,
+        start_time: startTimeIso,
+        end_time: endTimeIso,
+        google_calendar_event_id: event.data.id,
+        notes: notes || ''
+      });
+    } catch (dbError) {
+      console.error('Error storing appointment in database:', dbError);
+      // Continue anyway since the calendar event was created
+    }
+  }
+  
+  // Return success response
+  return res.status(200).json({
+    success: true,
+    action: 'create',
+    eventId: event.data.id,
+    eventLink: event.data.htmlLink,
+    message: 'Appointment added to calendar'
+  });
+}
+
+// Helper function for cancelling client appointments
+async function handleCancelClientAppointment(calendar, calendarId, eventId, clientName, clientPhone, startDateTime, res) {
+  try {
+    // If no eventId is provided, try to find by client info
+    let eventToCancel = null;
+    
+    if (!eventId) {
+      if (!clientName && !clientPhone) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Either event ID or client information is required for cancelling events' 
+        });
+      }
+      
+      // Try to find the event by client name or phone (might be in description)
+      const searchTerm = clientName || clientPhone;
+      eventToCancel = await findEventByClientName(
+        calendar, 
+        calendarId, 
+        searchTerm, 
+        startDateTime ? new Date(startDateTime) : null
+      );
+      
+      if (!eventToCancel) {
+        return res.status(404).json({
+          success: false,
+          error: `No matching event found for client "${searchTerm}"`
+        });
+      }
+      
+      eventId = eventToCancel.id;
+      console.log(`Found event to cancel: ${eventId} (${eventToCancel.summary})`);
+    } else {
+      // Verify the event exists
+      try {
+        eventToCancel = await calendar.events.get({
+          calendarId: calendarId,
+          eventId: eventId
+        });
+      } catch (getErr) {
+        if (getErr.response && getErr.response.status === 404) {
+          return res.status(404).json({
+            success: false,
+            error: 'Event not found with the provided ID'
+          });
+        }
+        throw getErr;
+      }
+    }
+    
+    // Event exists, delete it
+    await calendar.events.delete({
+      calendarId: calendarId,
+      eventId: eventId,
+      sendUpdates: 'all' // Send update notifications
+    });
+    
+    // Try to update appointment status in database
+    try {
+      const { data, error } = await supabase
+        .from('appointments')
+        .update({ status: 'cancelled', updated_at: new Date() })
+        .eq('google_calendar_event_id', eventId);
+        
+      if (error) {
+        console.error('Error updating appointment status:', error);
+      }
+    } catch (dbError) {
+      console.error('Database error when cancelling appointment:', dbError);
+    }
+    
+    return res.status(200).json({
+      success: true,
+      action: 'cancel',
+      eventId: eventId,
+      message: 'Appointment successfully cancelled'
+    });
+  } catch (error) {
+    console.error('Error cancelling event:', error);
+    throw error;
+  }
+}
+
+// Helper function for rescheduling client appointments
+async function handleRescheduleClientAppointment(calendar, calendarId, eventId, clientName, clientPhone, oldStartDateTime, newStartDateTime, duration, res) {
+  if (!newStartDateTime) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'New start date-time is required for rescheduling' 
+    });
+  }
+  
+  try {
+    // If no eventId is provided, try to find by client info
+    let existingEvent;
+    
+    if (!eventId) {
+      if (!clientName && !clientPhone) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Either event ID or client information is required for rescheduling' 
+        });
+      }
+      
+      // Try to find the event by client name or phone
+      const searchTerm = clientName || clientPhone;
+      const foundEvent = await findEventByClientName(
+        calendar, 
+        calendarId, 
+        searchTerm, 
+        oldStartDateTime ? new Date(oldStartDateTime) : null
+      );
+      
+      if (!foundEvent) {
+        return res.status(404).json({
+          success: false,
+          error: `No matching event found for client "${searchTerm}"`
+        });
+      }
+      
+      eventId = foundEvent.id;
+      existingEvent = { data: foundEvent };
+      console.log(`Found event to reschedule: ${eventId} (${foundEvent.summary})`);
+    } else {
+      // Get the existing event details
+      try {
+        existingEvent = await calendar.events.get({
+          calendarId: calendarId,
+          eventId: eventId
+        });
+      } catch (getErr) {
+        if (getErr.response && getErr.response.status === 404) {
+          return res.status(404).json({
+            success: false,
+            error: 'Event not found with the provided ID'
+          });
+        }
+        throw getErr;
+      }
+    }
+    
+    const startTime = parsePacificDateTime(newStartDateTime);
+    const endTime = new Date(startTime.getTime() + (duration * 60000));
+    
+    // Prepare updated event details - keep everything except the times
+    const updatedEvent = {
+      ...existingEvent.data,
+      start: {
+        dateTime: startTime.toISOString(),
+        timeZone: 'America/Los_Angeles'
+      },
+      end: {
+        dateTime: endTime.toISOString(),
+        timeZone: 'America/Los_Angeles'
+      }
+    };
+    
+    // Update the event
+    const result = await calendar.events.update({
+      calendarId: calendarId,
+      eventId: eventId,
+      resource: updatedEvent,
+      sendUpdates: 'all' // Send update notifications
+    });
+    
+    // Try to update appointment in database
+    try {
+      const { data, error } = await supabase
+        .from('appointments')
+        .update({ 
+          start_time: startTime.toISOString(),
+          end_time: endTime.toISOString(),
+          updated_at: new Date()
+        })
+        .eq('google_calendar_event_id', eventId);
+        
+      if (error) {
+        console.error('Error updating appointment times:', error);
+      }
+    } catch (dbError) {
+      console.error('Database error when rescheduling appointment:', dbError);
+    }
+    
+    return res.status(200).json({
+      success: true,
+      action: 'reschedule',
+      eventId: result.data.id,
+      eventLink: result.data.htmlLink,
+      message: 'Appointment successfully rescheduled'
+    });
+  } catch (error) {
+    console.error('Error rescheduling event:', error);
+    throw error;
+  }
+}
 
 // Add endpoint for updating client preferences
 router.post('/update-client-preference', async (req, res) => {

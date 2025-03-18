@@ -217,7 +217,10 @@ router.post('/client-appointment', async (req, res) => {
 
   try {
     // Get client details from the database
+    console.log('Looking up client with phone number:', clientPhone);
     const client = await clientOps.getByPhoneNumber(clientPhone);
+    
+    console.log('Client lookup result:', client);
     
     if (!client) {
       return res.status(404).json({
@@ -323,10 +326,16 @@ router.post('/client-appointment', async (req, res) => {
 
   } catch (error) {
     console.error('Client appointment processing error:', error);
+    // More detailed error logging
+    if (error.response) {
+      console.error('Error response data:', error.response.data);
+      console.error('Error response status:', error.response.status);
+    }
     
     return res.status(500).json({
       success: false,
       error: error.message,
+      stack: error.stack, // Add stack trace for debugging
       details: error.response?.data || 'Unknown error'
     });
   }

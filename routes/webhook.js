@@ -503,8 +503,25 @@ router.post('/check-availability', async (req, res) => {
 
 // Helper function to create a new event
 function parsePacificDateTime(dateTimeString) {
-  // Extract date parts from the string
-  const match = dateTimeString.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/);
+  // Clean the date string to remove milliseconds if present
+  let cleanDateString = dateTimeString;
+  if (dateTimeString.includes('.')) {
+    // Remove milliseconds part (everything between the dot and Z or timezone offset)
+    cleanDateString = dateTimeString.replace(/\.\d+(?=[Z+-])/, '');
+  }
+  
+  // Try to parse the date directly first
+  try {
+    const date = new Date(cleanDateString);
+    if (!isNaN(date.getTime())) {
+      return date;
+    }
+  } catch (e) {
+    console.log('Direct date parsing failed, trying formatted parsing');
+  }
+  
+  // Fall back to regex pattern matching for specific format
+  const match = cleanDateString.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
   
   if (!match) {
     throw new Error(`Invalid date format: ${dateTimeString}`);
@@ -513,7 +530,6 @@ function parsePacificDateTime(dateTimeString) {
   const [_, year, month, day, hour, minute, second] = match;
   
   // Create a date object with explicit Pacific time values
-  // Note: This creates the date in UTC, so we need to adjust for Pacific timezone
   const date = new Date(Date.UTC(
     parseInt(year, 10),
     parseInt(month, 10) - 1,  // Months are 0-indexed

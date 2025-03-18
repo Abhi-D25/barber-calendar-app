@@ -187,6 +187,311 @@ router.post('/create-event', async (req, res) => {
   }
 });
 
+// Add this new endpoint for client-initiated appointments
+router.post('/client-appointment', async (req, res) => {
+  const {
+    clientPhone,
+    clientName,
+    serviceType = 'Haircut',
+    startDateTime,
+    duration = 30,
+    notes = '',
+    preferredBarberId // Optional: if not provided, we'll use the one from the DB
+  } = req.body;
+
+  console.log('Client appointment webhook received:', { clientPhone, clientName, serviceType, startDateTime });
+
+  if (!clientPhone) {
+    return res.status(400).json({
+      success: false,
+      error: 'Client phone number is required'
+    });
+  }
+
+  if (!startDateTime) {
+    return res.status(400).json({
+      success: false,
+      error: 'Start date-time is required'
+    });
+  }
+
+  try {
+    // Get client details from the database
+    const client = await clientOps.getByPhoneNumber(clientPhone);
+    
+    if (!client) {
+      return res.status(404).json({
+        success: false,
+        error: 'Client not found'
+      });
+    }
+
+    // Determine which barber to use
+    let barberId = preferredBarberId || (client.preferred_barber ? client.preferred_barber.id : null);
+    
+    if (!barberId) {
+      return res.status(400).json({
+        success: false,
+        error: 'No barber specified and client has no preferred barber'
+      });
+    }
+
+    // Get barber details from the database
+    const { data: barber, error: barberError } = await supabase
+      .from('barbers')
+      .select('*')
+      .eq('id', barberId)
+      .single();
+
+    if (barberError || !barber || !barber.refresh_token) {
+      return res.status(404).json({
+        success: false,
+        error: 'Barber not found or not authorized'
+      });
+    }
+
+    // Create OAuth2 client with barber's refresh token
+    const oauth2Client = createOAuth2Client(barber.refresh_token);
+    
+    // Create Calendar API client
+    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+    
+    // Get calendar ID
+    const calendarId = barber.selected_calendar_id || 'primary';
+
+    // Parse dates with timezone handling
+    const startTime = parsePacificDateTime(startDateTime);
+    const endTime = new Date(startTime.getTime() + (duration * 60000));
+    
+    // Format as ISO strings
+    const startTimeIso = startTime.toISOString();
+    const endTimeIso = endTime.toISOString();
+    
+    // Prepare event details
+    const eventSummary = clientName 
+      ? `${serviceType}: ${clientName}`
+      : `${serviceType}: ${client.phone_number}`;
+      
+    const eventDetails = {
+      summary: eventSummary,
+      description: `Client: ${clientName || client.phone_number}\nPhone: ${clientPhone}\n${notes || ''}`,
+      start: {
+        dateTime: startTimeIso,
+        timeZone: 'America/Los_Angeles'
+      },
+      end: {
+        dateTime: endTimeIso,
+        timeZone: 'America/Los_Angeles'
+      }
+    };
+    
+    // Create event
+    const event = await calendar.events.insert({
+      calendarId: calendarId,
+      resource: eventDetails,
+      sendUpdates: 'all'
+    });
+    
+    // Store appointment in database
+    if (event.data && event.data.id) {
+      try {
+        await appointmentOps.create({
+          client_phone: clientPhone,
+          barber_id: barberId,
+          service_type: serviceType,
+          start_time: startTimeIso,
+          end_time: endTimeIso,
+          google_calendar_event_id: event.data.id,
+          notes: notes || ''
+        });
+      } catch (dbError) {
+        console.error('Error storing appointment in database:', dbError);
+        // Continue anyway since the calendar event was created
+      }
+    }
+    
+    // Return success response
+    return res.status(200).json({
+      success: true,
+      action: 'create',
+      eventId: event.data.id,
+      eventLink: event.data.htmlLink,
+      barberName: barber.name,
+      appointmentTime: startTimeIso,
+      message: 'Appointment added to calendar'
+    });
+
+  } catch (error) {
+    console.error('Client appointment processing error:', error);
+    
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.data || 'Unknown error'
+    });
+  }
+});
+
+// Add endpoint for updating client preferences
+router.post('/update-client-preference', async (req, res) => {
+  const {
+    clientPhone,
+    preferredBarberId
+  } = req.body;
+
+  console.log('Update client preference webhook received:', { clientPhone, preferredBarberId });
+
+  if (!clientPhone || !preferredBarberId) {
+    return res.status(400).json({
+      success: false,
+      error: 'Client phone number and preferred barber ID are required'
+    });
+  }
+
+  try {
+    // Check if client exists
+    const client = await clientOps.getByPhoneNumber(clientPhone);
+    
+    // Update or create client with preferred barber
+    const { data, error } = await supabase
+      .from('clients')
+      .upsert({
+        phone_number: clientPhone,
+        preferred_barber_id: preferredBarberId,
+        updated_at: new Date()
+      }, {
+        onConflict: 'phone_number'
+      })
+      .select();
+      
+    if (error) {
+      console.error('Error updating client preference:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update client preference'
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      action: 'update-preference',
+      message: 'Client preference updated successfully',
+      client: data[0]
+    });
+
+  } catch (error) {
+    console.error('Update client preference error:', error);
+    
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Add endpoint for checking barber availability
+router.post('/check-availability', async (req, res) => {
+  const {
+    barberPhoneNumber,
+    barberId,
+    startDateTime,
+    endDateTime,
+    duration = 30
+  } = req.body;
+
+  console.log('Check availability webhook received:', { barberPhoneNumber, barberId, startDateTime });
+
+  if (!barberPhoneNumber && !barberId) {
+    return res.status(400).json({
+      success: false,
+      error: 'Either barber phone number or barber ID is required'
+    });
+  }
+
+  if (!startDateTime) {
+    return res.status(400).json({
+      success: false,
+      error: 'Start date-time is required'
+    });
+  }
+
+  try {
+    // Find barber
+    let barber;
+    if (barberPhoneNumber) {
+      barber = await barberOps.getByPhoneNumber(barberPhoneNumber);
+    } else {
+      const { data, error } = await supabase
+        .from('barbers')
+        .select('*')
+        .eq('id', barberId)
+        .single();
+      barber = data;
+    }
+
+    if (!barber || !barber.refresh_token) {
+      return res.status(404).json({
+        success: false,
+        error: 'Barber not found or not authorized'
+      });
+    }
+
+    // Create OAuth2 client with barber's refresh token
+    const oauth2Client = createOAuth2Client(barber.refresh_token);
+    
+    // Create Calendar API client
+    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+    
+    // Get calendar ID
+    const calendarId = barber.selected_calendar_id || 'primary';
+
+    // Parse start date
+    const startTime = parsePacificDateTime(startDateTime);
+    
+    // Calculate end time
+    let endTime;
+    if (endDateTime) {
+      endTime = parsePacificDateTime(endDateTime);
+    } else {
+      endTime = new Date(startTime.getTime() + (duration * 60000));
+    }
+
+    // Check for events in this time range
+    const response = await calendar.events.list({
+      calendarId: calendarId,
+      timeMin: startTime.toISOString(),
+      timeMax: endTime.toISOString(),
+      singleEvents: true,
+      orderBy: 'startTime'
+    });
+
+    const events = response.data.items;
+    const isAvailable = events.length === 0;
+
+    return res.status(200).json({
+      success: true,
+      action: 'check-availability',
+      barberName: barber.name,
+      isAvailable: isAvailable,
+      conflictingEvents: isAvailable ? [] : events.map(event => ({
+        id: event.id,
+        summary: event.summary,
+        start: event.start.dateTime || event.start.date,
+        end: event.end.dateTime || event.end.date
+      }))
+    });
+
+  } catch (error) {
+    console.error('Check availability error:', error);
+    
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.data || 'Unknown error'
+    });
+  }
+});
+
 // Helper function to create a new event
 function parsePacificDateTime(dateTimeString) {
   // Extract date parts from the string

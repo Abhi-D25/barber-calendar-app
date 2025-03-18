@@ -110,6 +110,75 @@ const clientOps = {
       console.error('Error fetching client:', error);
     }
     return data;
+  },
+
+  async updatePreferredBarber(clientPhone, preferredBarberId) {
+    const { data, error } = await supabase
+      .from('clients')
+      .update({
+        preferred_barber_id: preferredBarberId,
+        updated_at: new Date()
+      })
+      .eq('phone_number', clientPhone)
+      .select();
+      
+    if (error) {
+      console.error('Error updating client preferred barber:', error);
+      return null;
+    }
+    
+    return data[0];
+  },
+  
+  async createOrUpdate(clientData) {
+    const { 
+      phone_number, 
+      name, 
+      email, 
+      preferred_barber_id 
+    } = clientData;
+    
+    // Check if client exists
+    const existingClient = await this.getByPhoneNumber(phone_number);
+    
+    if (existingClient) {
+      // Update existing client
+      const { data, error } = await supabase
+        .from('clients')
+        .update({
+          name: name || existingClient.name,
+          email: email || existingClient.email,
+          preferred_barber_id: preferred_barber_id || existingClient.preferred_barber_id,
+          updated_at: new Date()
+        })
+        .eq('phone_number', phone_number)
+        .select();
+        
+      if (error) {
+        console.error('Error updating client:', error);
+        return null;
+      }
+      
+      return data[0];
+    } else {
+      // Create new client
+      const { data, error } = await supabase
+        .from('clients')
+        .insert({
+          phone_number,
+          name: name || 'New Client',
+          email,
+          preferred_barber_id
+        })
+        .select();
+        
+      if (error) {
+        console.error('Error creating client:', error);
+        return null;
+      }
+      
+      return data[0];
+    }
   }
 };
 

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { google } = require('googleapis');
-const { barberOps, clientOps, appointmentOps } = require('../utils/supabase');
+const { barberOps, clientOps, appointmentOps, supabase } = require('../utils/supabase');
 
 // Create OAuth2 client
 const createOAuth2Client = (refreshToken) => {

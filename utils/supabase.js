@@ -129,7 +129,7 @@ const clientOps = {
     
     return data[0];
   },
-  
+
   async createOrUpdate(clientData) {
     const { 
       phone_number, 
@@ -184,6 +184,7 @@ const clientOps = {
 
 // Appointment operations
 const appointmentOps = {
+  // Keep your existing methods
   async create(appointmentData) {
     const { 
       client_phone, 
@@ -214,6 +215,64 @@ const appointmentOps = {
     }
     
     return data[0];
+  },
+  
+  // Add this new method for updating appointments
+  async updateByEventId(eventId, updateData) {
+    console.log(`Attempting to update appointment with event ID: ${eventId}`);
+    console.log('Update data:', updateData);
+    
+    const { data, error } = await supabase
+      .from('appointments')
+      .update({
+        ...updateData,
+        updated_at: new Date()
+      })
+      .eq('google_calendar_event_id', eventId)
+      .select();
+      
+    if (error) {
+      console.error('Error updating appointment:', error);
+      return { success: false, error };
+    }
+    
+    if (data && data.length === 0) {
+      console.warn(`No appointment found with event ID: ${eventId}`);
+      return { success: false, message: 'No matching appointment found' };
+    }
+    
+    console.log('Successfully updated appointment:', data);
+    return { success: true, data: data[0] };
+  },
+  
+  // Add this method to find appointments by client phone and date range
+  async findByClientPhone(clientPhone, startTimeRange) {
+    let query = supabase
+      .from('appointments')
+      .select('*')
+      .eq('client_phone', clientPhone);
+    
+    // If start time range is provided, filter by that too
+    if (startTimeRange) {
+      const { startBefore, startAfter } = startTimeRange;
+      
+      if (startBefore) {
+        query = query.lt('start_time', startBefore);
+      }
+      
+      if (startAfter) {
+        query = query.gt('start_time', startAfter);
+      }
+    }
+    
+    const { data, error } = await query;
+    
+    if (error) {
+      console.error('Error finding appointments:', error);
+      return [];
+    }
+    
+    return data;
   }
 };
 

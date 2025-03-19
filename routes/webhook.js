@@ -570,7 +570,7 @@ async function handleRescheduleClientAppointment(calendar, calendarId, eventId, 
       }
     };
     
-    // Update the event
+    // Update the event in Google Calendar
     const result = await calendar.events.update({
       calendarId: calendarId,
       eventId: eventId,
@@ -578,22 +578,70 @@ async function handleRescheduleClientAppointment(calendar, calendarId, eventId, 
       sendUpdates: 'all' // Send update notifications
     });
     
-    // Try to update appointment in database
+    // Try to update appointment in database using the appointmentOps helper
+    let dbResult;
     try {
-      const { data, error } = await supabase
-        .from('appointments')
-        .update({ 
-          start_time: startTime.toISOString(),
-          end_time: endTime.toISOString(),
-          updated_at: new Date()
-        })
-        .eq('google_calendar_event_id', eventId);
+      // First approach: Update by event ID
+      dbResult = await appointmentOps.updateByEventId(eventId, {
+        start_time: startTime.toISOString(),
+        end_time: endTime.toISOString()
+      });
+      
+      // If no records were updated and we have a phone number, try to find by phone
+      if (!dbResult.success && clientPhone) {
+        console.log(`No records updated by event ID, trying to find by client phone: ${clientPhone}`);
         
-      if (error) {
-        console.error('Error updating appointment times:', error);
+        // Get all appointments for this client
+        const clientAppointments = await appointmentOps.findByClientPhone(clientPhone, {
+          // If we have the old start time, use it to narrow down the search
+          startAfter: oldStartDateTime ? new Date(oldStartDateTime - 24*60*60*1000).toISOString() : null,
+          startBefore: oldStartDateTime ? new Date(oldStartDateTime + 24*60*60*1000).toISOString() : null
+        });
+        
+        if (clientAppointments && clientAppointments.length > 0) {
+          console.log(`Found ${clientAppointments.length} appointment(s) for this client`);
+          
+          // Find the one closest to the old start time, if provided
+          let appointmentToUpdate = clientAppointments[0];
+          
+          if (oldStartDateTime && clientAppointments.length > 1) {
+            const oldStartTime = new Date(oldStartDateTime);
+            appointmentToUpdate = clientAppointments.reduce((closest, current) => {
+              const currentDiff = Math.abs(new Date(current.start_time) - oldStartTime);
+              const closestDiff = Math.abs(new Date(closest.start_time) - oldStartTime);
+              return currentDiff < closestDiff ? current : closest;
+            });
+          }
+          
+          // Update the appointment
+          const { data, error } = await supabase
+            .from('appointments')
+            .update({
+              start_time: startTime.toISOString(),
+              end_time: endTime.toISOString(),
+              google_calendar_event_id: eventId, // Also update the event ID in case it's changed
+              updated_at: new Date()
+            })
+            .eq('id', appointmentToUpdate.id)
+            .select();
+            
+          if (error) {
+            console.error('Error updating appointment by ID:', error);
+          } else {
+            console.log('Successfully updated appointment by ID:', data);
+            dbResult = { success: true, data: data[0] };
+          }
+        }
       }
     } catch (dbError) {
       console.error('Database error when rescheduling appointment:', dbError);
+    }
+    
+    // Log the database update result
+    if (dbResult && dbResult.success) {
+      console.log('Database appointment successfully updated');
+    } else {
+      console.warn('Note: Calendar event was updated but database record may not have been updated');
     }
     
     return res.status(200).json({
@@ -601,7 +649,8 @@ async function handleRescheduleClientAppointment(calendar, calendarId, eventId, 
       action: 'reschedule',
       eventId: result.data.id,
       eventLink: result.data.htmlLink,
-      message: 'Appointment successfully rescheduled'
+      message: 'Appointment successfully rescheduled',
+      dbUpdateSuccess: dbResult ? dbResult.success : false
     });
   } catch (error) {
     console.error('Error rescheduling event:', error);

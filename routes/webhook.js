@@ -1017,9 +1017,22 @@ async function handleRescheduleEvent(calendar, calendarId, eventId, data, res) {
       }
     }
     
-    const startTime = parsePacificDateTime(startDateTime);
-    const endTime = new Date(startTime.getTime() + (duration * 60000));
+    let eventDuration = duration;
+    if (existingEvent && existingEvent.data) {
+      const originalStart = new Date(existingEvent.data.start.dateTime);
+      const originalEnd = new Date(existingEvent.data.end.dateTime);
+      // Calculate actual duration in milliseconds, then convert to minutes
+      const originalDuration = (originalEnd - originalStart) / (1000 * 60);
+      
+      // Use the original duration if available, otherwise use the provided duration
+      eventDuration = originalDuration || duration;
+      
+      console.log(`Original event duration: ${eventDuration} minutes`);
+    }
     
+    const startTime = parsePacificDateTime(newStartDateTime);
+    const endTime = new Date(startTime.getTime() + (eventDuration * 60000));
+
     // Prepare updated event details - keep everything except the times
     const updatedEvent = {
       ...existingEvent.data,

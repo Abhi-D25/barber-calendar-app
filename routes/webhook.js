@@ -673,10 +673,10 @@ router.post('/check-availability', async (req, res) => {
     barberId,
     startDateTime,
     endDateTime,
-    duration = 30,
     returnFormat = "zapier"
   } = req.body;
 
+  // Log the incoming request
   console.log('Check availability webhook received:', { barberPhoneNumber, barberId, startDateTime, endDateTime });
 
   if (!barberPhoneNumber && !barberId) {
@@ -691,7 +691,6 @@ router.post('/check-availability', async (req, res) => {
     let barber;
     if (barberPhoneNumber) {
       barber = await barberOps.getByPhoneNumber(barberPhoneNumber);
-      console.log('Found barber by phone:', barber ? barber.name : 'Not found');
     } else {
       const { data, error } = await supabase
         .from('barbers')
@@ -699,7 +698,6 @@ router.post('/check-availability', async (req, res) => {
         .eq('id', barberId)
         .single();
       barber = data;
-      console.log('Found barber by ID:', barber ? barber.name : 'Not found');
     }
 
     if (!barber || !barber.refresh_token) {
@@ -717,56 +715,47 @@ router.post('/check-availability', async (req, res) => {
     
     // Get calendar ID
     const calendarId = barber.selected_calendar_id || 'primary';
-    console.log('Using calendar ID:', calendarId);
 
-    // Determine time range to search
-    let timeMin, timeMax;
+    // DIRECT APPROACH: Manually create Pacific time dates with correct offset
+    // Extract date and time components
+    let startComponents = startDateTime.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
+    let endComponents = endDateTime.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
     
-    try {
-      // Try direct Date parsing first for more accurate timezone handling
-      timeMin = new Date(startDateTime);
-      timeMax = new Date(endDateTime);
-      
-      console.log('Direct date parsing:');
-      console.log('timeMin (local):', timeMin.toString());
-      console.log('timeMax (local):', timeMax.toString());
-      console.log('timeMin (ISO):', timeMin.toISOString());
-      console.log('timeMax (ISO):', timeMax.toISOString());
-    } catch (parseError) {
-      console.error('Error with direct date parsing:', parseError);
-      // Fall back to custom parsing
-      timeMin = parsePacificDateTime(startDateTime);
-      timeMax = parsePacificDateTime(endDateTime);
+    if (!startComponents || !endComponents) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid date format. Expected YYYY-MM-DDTHH:MM:SS'
+      });
     }
+    
+    // Convert string times to Pacific time by creating correctly formatted strings with timezone offset
+    // For March 2025, Pacific time should be PDT (-07:00)
+    const pacificStartTime = `${startDateTime.split('.')[0]}-07:00`;
+    const pacificEndTime = `${endDateTime.split('.')[0]}-07:00`;
+    
+    // Parse these as dates
+    const timeMin = new Date(pacificStartTime);
+    const timeMax = new Date(pacificEndTime);
+    
+    console.log('Using Pacific time interpretation:');
+    console.log('Pacific start time:', pacificStartTime);
+    console.log('Pacific end time:', pacificEndTime);
+    console.log('Converted timeMin:', timeMin.toISOString());
+    console.log('Converted timeMax:', timeMax.toISOString());
 
-    console.log('Searching for events between:');
-    console.log('timeMin:', timeMin.toISOString());
-    console.log('timeMax:', timeMax.toISOString());
-
-    // Get events in this time range
+    // Get events in this time range with explicit Pacific timezone
     const response = await calendar.events.list({
       calendarId: calendarId,
       timeMin: timeMin.toISOString(),
       timeMax: timeMax.toISOString(),
+      timeZone: 'America/Los_Angeles', // This tells Google Calendar to interpret the times in Pacific timezone
       singleEvents: true,
       orderBy: 'startTime',
       maxResults: 100
     });
 
-    console.log(`Found ${response.data.items.length} events in calendar`);
-    
-    // Log first event if any (for debugging)
-    if (response.data.items.length > 0) {
-      const firstEvent = response.data.items[0];
-      console.log('Sample event:', {
-        id: firstEvent.id,
-        summary: firstEvent.summary,
-        start: firstEvent.start,
-        end: firstEvent.end
-      });
-    }
-
     const events = response.data.items;
+    console.log(`Found ${events.length} events in calendar for the specified time range`);
     
     // If the returnFormat is "zapier", format the response to match Zapier's Google Calendar output
     if (returnFormat === "zapier") {
@@ -790,20 +779,22 @@ router.post('/check-availability', async (req, res) => {
         };
       });
       
-      // Return formatted events
+      // Return the events in Zapier's format with debugging info
       return res.status(200).json({
         events: formattedEvents,
         debug: {
           searchTimeRange: {
             start: timeMin.toISOString(),
-            end: timeMax.toISOString()
+            end: timeMax.toISOString(),
+            pacificStart: pacificStartTime,
+            pacificEnd: pacificEndTime
           },
           calendarId: calendarId,
           eventsFound: events.length
         }
       });
     } else {
-      // Standard format
+      // Standard format response
       return res.status(200).json({
         success: true,
         action: 'check-availability',

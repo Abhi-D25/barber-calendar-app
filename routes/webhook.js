@@ -411,6 +411,7 @@ async function handleCreateClientAppointment(calendar, calendarId, data, res) {
 }
 
 // Helper function for cancelling client appointments
+// Helper function for cancelling client appointments
 async function handleCancelClientAppointment(calendar, calendarId, eventId, clientName, clientPhone, startDateTime, res) {
   try {
     // If no eventId is provided, try to find by client info
@@ -460,32 +461,34 @@ async function handleCancelClientAppointment(calendar, calendarId, eventId, clie
       }
     }
     
-    // Event exists, delete it
+    // Event exists, delete it from Google Calendar
     await calendar.events.delete({
       calendarId: calendarId,
       eventId: eventId,
       sendUpdates: 'all' // Send update notifications
     });
     
-    // Try to update appointment status in database
+    // Delete the appointment from the database instead of updating status
     try {
       const { data, error } = await supabase
         .from('appointments')
-        .update({ status: 'cancelled', updated_at: new Date() })
+        .delete()
         .eq('google_calendar_event_id', eventId);
         
       if (error) {
-        console.error('Error updating appointment status:', error);
+        console.error('Error deleting appointment from database:', error);
+      } else {
+        console.log('Successfully deleted appointment from database');
       }
     } catch (dbError) {
-      console.error('Database error when cancelling appointment:', dbError);
+      console.error('Database error when deleting appointment:', dbError);
     }
     
     return res.status(200).json({
       success: true,
       action: 'cancel',
       eventId: eventId,
-      message: 'Appointment successfully cancelled'
+      message: 'Appointment successfully cancelled and removed from database'
     });
   } catch (error) {
     console.error('Error cancelling event:', error);

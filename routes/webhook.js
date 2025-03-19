@@ -846,17 +846,13 @@ function parsePacificDateTime(dateTimeString) {
     cleanDateString = dateTimeString.replace(/\.\d+(?=[Z+-])/, '');
   }
   
-  // Try to parse the date directly first
-  try {
-    const date = new Date(cleanDateString);
-    if (!isNaN(date.getTime())) {
-      return date;
-    }
-  } catch (e) {
-    console.log('Direct date parsing failed, trying formatted parsing');
+  // If date string already has timezone info, parse it directly
+  if (cleanDateString.includes('Z') || cleanDateString.includes('+') || cleanDateString.includes('-')) {
+    return new Date(cleanDateString);
   }
   
-  // Fall back to regex pattern matching for specific format
+  // For dates without timezone, we'll interpret as Pacific time
+  // First, parse the date components
   const match = cleanDateString.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
   
   if (!match) {
@@ -865,17 +861,36 @@ function parsePacificDateTime(dateTimeString) {
   
   const [_, year, month, day, hour, minute, second] = match;
   
-  // Create a date object with explicit Pacific time values
-  const date = new Date(Date.UTC(
-    parseInt(year, 10),
-    parseInt(month, 10) - 1,  // Months are 0-indexed
-    parseInt(day, 10),
-    parseInt(hour, 10) + 7,  // Add 7 hours to convert from Pacific to UTC
-    parseInt(minute, 10),
-    parseInt(second, 10)
-  ));
+  // Create a date string with the Pacific timezone offset
+  // We'll create a string like: "2025-03-22T08:00:00-07:00" or "2025-03-22T08:00:00-08:00"
+  // depending on whether DST is in effect
   
-  return date;
+  // Create a date object for the specified date
+  const tempDate = new Date(
+    parseInt(year, 10), 
+    parseInt(month, 10) - 1, 
+    parseInt(day, 10)
+  );
+  
+  // Get the Pacific timezone offset for this date
+  // This accounts for daylight saving time automatically
+  const pacificDate = new Date(tempDate.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  const utcDate = new Date(tempDate.toLocaleString('en-US', { timeZone: 'UTC' }));
+  
+  // The difference in hours is the Pacific offset from UTC
+  const offsetHours = (pacificDate - utcDate) / (1000 * 60 * 60);
+  
+  // Now we can create a proper date object with the UTC offset
+  const utcOffsetHours = -offsetHours; // Convert to UTC offset format (negative for Pacific)
+  const offsetSign = utcOffsetHours <= 0 ? '-' : '+';
+  const absOffsetHours = Math.abs(utcOffsetHours);
+  const offsetString = `${offsetSign}${String(Math.floor(absOffsetHours)).padStart(2, '0')}:00`;
+  
+  // Create final date string with correct offset
+  const pacificTimeString = `${year}-${month}-${day}T${hour}:${minute}:${second}${offsetString}`;
+  
+  // Parse as UTC date
+  return new Date(pacificTimeString);
 }
 
 // Modify in handleCreateEvent function

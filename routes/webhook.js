@@ -673,22 +673,16 @@ router.post('/check-availability', async (req, res) => {
     barberId,
     startDateTime,
     endDateTime,
-    duration = 30
+    duration = 30,
+    returnFormat = "zapier" // New parameter to control output format
   } = req.body;
 
-  console.log('Check availability webhook received:', { barberPhoneNumber, barberId, startDateTime });
+  console.log('Check availability webhook received:', { barberPhoneNumber, barberId, startDateTime, endDateTime });
 
   if (!barberPhoneNumber && !barberId) {
     return res.status(400).json({
       success: false,
       error: 'Either barber phone number or barber ID is required'
-    });
-  }
-
-  if (!startDateTime) {
-    return res.status(400).json({
-      success: false,
-      error: 'Start date-time is required'
     });
   }
 
@@ -722,42 +716,78 @@ router.post('/check-availability', async (req, res) => {
     // Get calendar ID
     const calendarId = barber.selected_calendar_id || 'primary';
 
-    // Parse start date
-    const startTime = parsePacificDateTime(startDateTime);
+    // Determine time range to search
+    let timeMin, timeMax;
     
-    // Calculate end time
-    let endTime;
-    if (endDateTime) {
-      endTime = parsePacificDateTime(endDateTime);
+    if (startDateTime) {
+      timeMin = parsePacificDateTime(startDateTime);
     } else {
-      endTime = new Date(startTime.getTime() + (duration * 60000));
+      timeMin = new Date();
+    }
+    
+    if (endDateTime) {
+      timeMax = parsePacificDateTime(endDateTime);
+    } else {
+      // Default to looking ahead 24 hours if no end time provided
+      timeMax = new Date(timeMin.getTime() + (24 * 60 * 60 * 1000));
     }
 
-    // Check for events in this time range
+    // Get events in this time range
     const response = await calendar.events.list({
       calendarId: calendarId,
-      timeMin: startTime.toISOString(),
-      timeMax: endTime.toISOString(),
+      timeMin: timeMin.toISOString(),
+      timeMax: timeMax.toISOString(),
       singleEvents: true,
-      orderBy: 'startTime'
+      orderBy: 'startTime',
+      maxResults: 100 // Get a reasonable number of events
     });
 
     const events = response.data.items;
-    const isAvailable = events.length === 0;
-
-    return res.status(200).json({
-      success: true,
-      action: 'check-availability',
-      barberName: barber.name,
-      isAvailable: isAvailable,
-      conflictingEvents: isAvailable ? [] : events.map(event => ({
-        id: event.id,
-        summary: event.summary,
-        start: event.start.dateTime || event.start.date,
-        end: event.end.dateTime || event.end.date
-      }))
-    });
-
+    
+    // If the returnFormat is "zapier", format the response to match Zapier's Google Calendar output
+    if (returnFormat === "zapier") {
+      // Transform the events to match Zapier's output format
+      const formattedEvents = events.map(event => {
+        // Format dates to match Zapier's output
+        const startTime = new Date(event.start.dateTime || event.start.date);
+        const endTime = new Date(event.end.dateTime || event.end.date);
+        
+        return {
+          // These are the key fields that Zapier's Google Calendar connector returns
+          "Event ID": event.id,
+          "Event Begins": startTime.toISOString(),
+          "Event Ends": endTime.toISOString(),
+          "Event Name": event.summary || "Untitled Event",
+          "Event Description": event.description || "",
+          "Event Location": event.location || "",
+          "Event Link": event.htmlLink || "",
+          "Calendar ID": calendarId,
+          // Add any other fields your Zap might be using
+          "Created": event.created || "",
+          "Updated": event.updated || "",
+          "Creator Email": event.creator?.email || ""
+        };
+      });
+      
+      // Return the events in Zapier's format
+      return res.status(200).json({
+        events: formattedEvents
+      });
+    } else {
+      // Return in our standard format
+      return res.status(200).json({
+        success: true,
+        action: 'check-availability',
+        barberName: barber.name,
+        isAvailable: events.length === 0,
+        events: events.map(event => ({
+          id: event.id,
+          summary: event.summary,
+          start: event.start.dateTime || event.start.date,
+          end: event.end.dateTime || event.end.date
+        }))
+      });
+    }
   } catch (error) {
     console.error('Check availability error:', error);
     

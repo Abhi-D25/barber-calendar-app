@@ -674,7 +674,7 @@ router.post('/check-availability', async (req, res) => {
     startDateTime,
     endDateTime,
     duration = 30,
-    returnFormat = "zapier" // New parameter to control output format
+    returnFormat = "zapier"
   } = req.body;
 
   console.log('Check availability webhook received:', { barberPhoneNumber, barberId, startDateTime, endDateTime });
@@ -691,6 +691,7 @@ router.post('/check-availability', async (req, res) => {
     let barber;
     if (barberPhoneNumber) {
       barber = await barberOps.getByPhoneNumber(barberPhoneNumber);
+      console.log('Found barber by phone:', barber ? barber.name : 'Not found');
     } else {
       const { data, error } = await supabase
         .from('barbers')
@@ -698,6 +699,7 @@ router.post('/check-availability', async (req, res) => {
         .eq('id', barberId)
         .single();
       barber = data;
+      console.log('Found barber by ID:', barber ? barber.name : 'Not found');
     }
 
     if (!barber || !barber.refresh_token) {
@@ -715,22 +717,31 @@ router.post('/check-availability', async (req, res) => {
     
     // Get calendar ID
     const calendarId = barber.selected_calendar_id || 'primary';
+    console.log('Using calendar ID:', calendarId);
 
     // Determine time range to search
     let timeMin, timeMax;
     
-    if (startDateTime) {
+    try {
+      // Try direct Date parsing first for more accurate timezone handling
+      timeMin = new Date(startDateTime);
+      timeMax = new Date(endDateTime);
+      
+      console.log('Direct date parsing:');
+      console.log('timeMin (local):', timeMin.toString());
+      console.log('timeMax (local):', timeMax.toString());
+      console.log('timeMin (ISO):', timeMin.toISOString());
+      console.log('timeMax (ISO):', timeMax.toISOString());
+    } catch (parseError) {
+      console.error('Error with direct date parsing:', parseError);
+      // Fall back to custom parsing
       timeMin = parsePacificDateTime(startDateTime);
-    } else {
-      timeMin = new Date();
-    }
-    
-    if (endDateTime) {
       timeMax = parsePacificDateTime(endDateTime);
-    } else {
-      // Default to looking ahead 24 hours if no end time provided
-      timeMax = new Date(timeMin.getTime() + (24 * 60 * 60 * 1000));
     }
+
+    console.log('Searching for events between:');
+    console.log('timeMin:', timeMin.toISOString());
+    console.log('timeMax:', timeMax.toISOString());
 
     // Get events in this time range
     const response = await calendar.events.list({
@@ -739,8 +750,21 @@ router.post('/check-availability', async (req, res) => {
       timeMax: timeMax.toISOString(),
       singleEvents: true,
       orderBy: 'startTime',
-      maxResults: 100 // Get a reasonable number of events
+      maxResults: 100
     });
+
+    console.log(`Found ${response.data.items.length} events in calendar`);
+    
+    // Log first event if any (for debugging)
+    if (response.data.items.length > 0) {
+      const firstEvent = response.data.items[0];
+      console.log('Sample event:', {
+        id: firstEvent.id,
+        summary: firstEvent.summary,
+        start: firstEvent.start,
+        end: firstEvent.end
+      });
+    }
 
     const events = response.data.items;
     
@@ -748,12 +772,10 @@ router.post('/check-availability', async (req, res) => {
     if (returnFormat === "zapier") {
       // Transform the events to match Zapier's output format
       const formattedEvents = events.map(event => {
-        // Format dates to match Zapier's output
         const startTime = new Date(event.start.dateTime || event.start.date);
         const endTime = new Date(event.end.dateTime || event.end.date);
         
         return {
-          // These are the key fields that Zapier's Google Calendar connector returns
           "Event ID": event.id,
           "Event Begins": startTime.toISOString(),
           "Event Ends": endTime.toISOString(),
@@ -762,19 +784,26 @@ router.post('/check-availability', async (req, res) => {
           "Event Location": event.location || "",
           "Event Link": event.htmlLink || "",
           "Calendar ID": calendarId,
-          // Add any other fields your Zap might be using
           "Created": event.created || "",
           "Updated": event.updated || "",
           "Creator Email": event.creator?.email || ""
         };
       });
       
-      // Return the events in Zapier's format
+      // Return formatted events
       return res.status(200).json({
-        events: formattedEvents
+        events: formattedEvents,
+        debug: {
+          searchTimeRange: {
+            start: timeMin.toISOString(),
+            end: timeMax.toISOString()
+          },
+          calendarId: calendarId,
+          eventsFound: events.length
+        }
       });
     } else {
-      // Return in our standard format
+      // Standard format
       return res.status(200).json({
         success: true,
         action: 'check-availability',
@@ -785,7 +814,15 @@ router.post('/check-availability', async (req, res) => {
           summary: event.summary,
           start: event.start.dateTime || event.start.date,
           end: event.end.dateTime || event.end.date
-        }))
+        })),
+        debug: {
+          searchTimeRange: {
+            start: timeMin.toISOString(),
+            end: timeMax.toISOString()
+          },
+          calendarId: calendarId,
+          eventsFound: events.length
+        }
       });
     }
   } catch (error) {
@@ -794,6 +831,7 @@ router.post('/check-availability', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error.message,
+      stack: error.stack,
       details: error.response?.data || 'Unknown error'
     });
   }

@@ -757,17 +757,64 @@ router.post('/check-availability', async (req, res) => {
     const events = response.data.items;
     console.log(`Found ${events.length} events in calendar for the specified time range`);
     
-    // If the returnFormat is "zapier", format the response to match Zapier's Google Calendar output
     if (returnFormat === "zapier") {
       // Transform the events to match Zapier's output format
       const formattedEvents = events.map(event => {
         const startTime = new Date(event.start.dateTime || event.start.date);
         const endTime = new Date(event.end.dateTime || event.end.date);
         
+        // Format the dates in Pacific Time
+        const pacificStartTime = startTime.toLocaleString('en-US', {
+          timeZone: 'America/Los_Angeles',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false
+        });
+        
+        const pacificEndTime = endTime.toLocaleString('en-US', {
+          timeZone: 'America/Los_Angeles',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false
+        });
+        
+        // Convert to a structured format: YYYY-MM-DDTHH:MM:SS-07:00
+        const formatPacificTime = (timeStr) => {
+          // Parse the formatted date string
+          // Expected format: MM/DD/YYYY, HH:MM:SS
+          const parts = timeStr.split(', ');
+          const dateParts = parts[0].split('/');
+          const timeParts = parts[1];
+          
+          // Rearrange to ISO format
+          const month = dateParts[0].padStart(2, '0');
+          const day = dateParts[1].padStart(2, '0');
+          const year = dateParts[2];
+          
+          // Determine if PDT or PST is in effect for this date
+          const date = new Date(timeStr);
+          const tzName = date.toLocaleString('en-US', { 
+            timeZone: 'America/Los_Angeles', 
+            timeZoneName: 'short' 
+          }).split(' ').pop();
+          
+          const offset = tzName === 'PDT' ? '-07:00' : '-08:00';
+          
+          return `${year}-${month}-${day}T${timeParts}${offset}`;
+        };
+        
         return {
           "Event ID": event.id,
-          "Event Begins": startTime.toISOString(),
-          "Event Ends": endTime.toISOString(),
+          "Event Begins": formatPacificTime(pacificStartTime),
+          "Event Ends": formatPacificTime(pacificEndTime),
           "Event Name": event.summary || "Untitled Event",
           "Event Description": event.description || "",
           "Event Location": event.location || "",
@@ -779,7 +826,7 @@ router.post('/check-availability', async (req, res) => {
         };
       });
       
-      // Return the events in Zapier's format with debugging info
+      // Return the events in Zapier's format with Pacific times
       return res.status(200).json({
         events: formattedEvents,
         debug: {

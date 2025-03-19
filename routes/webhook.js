@@ -830,63 +830,43 @@ router.post('/check-availability', async (req, res) => {
 
 // Helper function to create a new event
 function parsePacificDateTime(dateTimeString) {
-  // If the string already has timezone info, parse it directly
-  if (dateTimeString.includes('Z') || 
-      dateTimeString.includes('+') || 
-      dateTimeString.includes('-')) {
-    return new Date(dateTimeString);
+  // Clean the date string to remove milliseconds if present
+  let cleanDateString = dateTimeString;
+  if (dateTimeString.includes('.')) {
+    // Remove milliseconds part (everything between the dot and Z or timezone offset)
+    cleanDateString = dateTimeString.replace(/\.\d+(?=[Z+-])/, '');
   }
   
-  // Extract date components
-  const match = dateTimeString.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?$/);
+  // Try to parse the date directly first
+  try {
+    const date = new Date(cleanDateString);
+    if (!isNaN(date.getTime())) {
+      return date;
+    }
+  } catch (e) {
+    console.log('Direct date parsing failed, trying formatted parsing');
+  }
+  
+  // Fall back to regex pattern matching for specific format
+  const match = cleanDateString.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
   
   if (!match) {
     throw new Error(`Invalid date format: ${dateTimeString}`);
   }
   
-  // Extract components - year, month, day, hour, minute, second
   const [_, year, month, day, hour, minute, second] = match;
   
-  // Create a date string with explicit Pacific timezone
-  // Instead of hardcoding +7, we'll create a date in Pacific time zone
-  
-  // Method 1: Using the date in Pacific timezone directly
-  const pacificDate = new Date(`${dateTimeString} Pacific Time`);
-  if (!isNaN(pacificDate.getTime())) {
-    return pacificDate;
-  }
-  
-  // If that doesn't work (older Node versions), fall back to method 2
-  // Use the Intl formatter to find the correct offset for this date
-  const tempDate = new Date(
+  // Create a date object with explicit Pacific time values
+  const date = new Date(Date.UTC(
     parseInt(year, 10),
-    parseInt(month, 10) - 1,
+    parseInt(month, 10) - 1,  // Months are 0-indexed
     parseInt(day, 10),
-    parseInt(hour, 10),
+    parseInt(hour, 10) + 7,  // Add 7 hours to convert from Pacific to UTC
     parseInt(minute, 10),
-    parseInt(second || 0, 10)
-  );
+    parseInt(second, 10)
+  ));
   
-  // Get the offset for Pacific Time on this date
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Los_Angeles',
-    timeZoneName: 'short'
-  });
-  
-  // Get timezone name (e.g., "PDT" or "PST")
-  const tzName = formatter.format(tempDate).split(' ').pop();
-  
-  // Determine offset based on timezone name
-  let offset;
-  if (tzName === 'PDT') {
-    offset = '-07:00'; // Pacific Daylight Time
-  } else {
-    offset = '-08:00'; // Pacific Standard Time
-  }
-  
-  // Create a date string with the correct offset
-  const dateWithTz = `${year}-${month}-${day}T${hour}:${minute}:${second}${offset}`;
-  return new Date(dateWithTz);
+  return date;
 }
 
 // Modify in handleCreateEvent function

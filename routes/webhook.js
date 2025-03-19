@@ -839,58 +839,63 @@ router.post('/check-availability', async (req, res) => {
 
 // Helper function to create a new event
 function parsePacificDateTime(dateTimeString) {
-  // Clean the date string to remove milliseconds if present
-  let cleanDateString = dateTimeString;
-  if (dateTimeString.includes('.')) {
-    // Remove milliseconds part (everything between the dot and Z or timezone offset)
-    cleanDateString = dateTimeString.replace(/\.\d+(?=[Z+-])/, '');
+  // If the string already has timezone info, parse it directly
+  if (dateTimeString.includes('Z') || 
+      dateTimeString.includes('+') || 
+      dateTimeString.includes('-')) {
+    return new Date(dateTimeString);
   }
   
-  // If date string already has timezone info, parse it directly
-  if (cleanDateString.includes('Z') || cleanDateString.includes('+') || cleanDateString.includes('-')) {
-    return new Date(cleanDateString);
-  }
-  
-  // For dates without timezone, we'll interpret as Pacific time
-  // First, parse the date components
-  const match = cleanDateString.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+  // Extract date components
+  const match = dateTimeString.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?$/);
   
   if (!match) {
     throw new Error(`Invalid date format: ${dateTimeString}`);
   }
   
+  // Extract components - year, month, day, hour, minute, second
   const [_, year, month, day, hour, minute, second] = match;
   
-  // Create a date string with the Pacific timezone offset
-  // We'll create a string like: "2025-03-22T08:00:00-07:00" or "2025-03-22T08:00:00-08:00"
-  // depending on whether DST is in effect
+  // Create a date string with explicit Pacific timezone
+  // Instead of hardcoding +7, we'll create a date in Pacific time zone
   
-  // Create a date object for the specified date
+  // Method 1: Using the date in Pacific timezone directly
+  const pacificDate = new Date(`${dateTimeString} Pacific Time`);
+  if (!isNaN(pacificDate.getTime())) {
+    return pacificDate;
+  }
+  
+  // If that doesn't work (older Node versions), fall back to method 2
+  // Use the Intl formatter to find the correct offset for this date
   const tempDate = new Date(
-    parseInt(year, 10), 
-    parseInt(month, 10) - 1, 
-    parseInt(day, 10)
+    parseInt(year, 10),
+    parseInt(month, 10) - 1,
+    parseInt(day, 10),
+    parseInt(hour, 10),
+    parseInt(minute, 10),
+    parseInt(second || 0, 10)
   );
   
-  // Get the Pacific timezone offset for this date
-  // This accounts for daylight saving time automatically
-  const pacificDate = new Date(tempDate.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
-  const utcDate = new Date(tempDate.toLocaleString('en-US', { timeZone: 'UTC' }));
+  // Get the offset for Pacific Time on this date
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
+    timeZoneName: 'short'
+  });
   
-  // The difference in hours is the Pacific offset from UTC
-  const offsetHours = (pacificDate - utcDate) / (1000 * 60 * 60);
+  // Get timezone name (e.g., "PDT" or "PST")
+  const tzName = formatter.format(tempDate).split(' ').pop();
   
-  // Now we can create a proper date object with the UTC offset
-  const utcOffsetHours = -offsetHours; // Convert to UTC offset format (negative for Pacific)
-  const offsetSign = utcOffsetHours <= 0 ? '-' : '+';
-  const absOffsetHours = Math.abs(utcOffsetHours);
-  const offsetString = `${offsetSign}${String(Math.floor(absOffsetHours)).padStart(2, '0')}:00`;
+  // Determine offset based on timezone name
+  let offset;
+  if (tzName === 'PDT') {
+    offset = '-07:00'; // Pacific Daylight Time
+  } else {
+    offset = '-08:00'; // Pacific Standard Time
+  }
   
-  // Create final date string with correct offset
-  const pacificTimeString = `${year}-${month}-${day}T${hour}:${minute}:${second}${offsetString}`;
-  
-  // Parse as UTC date
-  return new Date(pacificTimeString);
+  // Create a date string with the correct offset
+  const dateWithTz = `${year}-${month}-${day}T${hour}:${minute}:${second}${offset}`;
+  return new Date(dateWithTz);
 }
 
 // Modify in handleCreateEvent function

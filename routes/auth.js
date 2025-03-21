@@ -133,10 +133,12 @@ async function updateFormBarberDropdown(refreshToken) {
       formId: process.env.GOOGLE_FORM_ID
     });
     
-    // Find the target question (barber selection dropdown)
+    // Find the target question (barber selection dropdown) by looking for the first dropdown in the form
+    // or you could search by title if your dropdown has a specific title
     const targetQuestion = form.data.items.find(item => 
       item.questionItem && 
-      item.questionItem.question.questionId === process.env.GOOGLE_FORM_BARBER_QUESTION_ID
+      item.questionItem.question.choiceQuestion &&
+      item.questionItem.question.choiceQuestion.type === 'DROP_DOWN'
     );
     
     if (!targetQuestion) {
@@ -155,7 +157,7 @@ async function updateFormBarberDropdown(refreshToken) {
             itemId: targetQuestion.itemId,
             questionItem: {
               question: {
-                questionId: process.env.GOOGLE_FORM_BARBER_QUESTION_ID,
+                questionId: targetQuestion.questionItem.question.questionId,
                 choiceQuestion: {
                   type: 'DROP_DOWN',
                   options: barberNames.map(name => ({
@@ -267,12 +269,12 @@ router.get('/get-form-info', async (req, res) => {
 
 // Add method to manually update form dropdown
 router.post('/update-form-dropdown', async (req, res) => {
-  const { formId, questionId } = req.body;
+  const { formId } = req.body;
   
-  if (!formId || !questionId) {
+  if (!formId) {
     return res.status(400).json({
       success: false,
-      error: 'Form ID and Question ID are required'
+      error: 'Form ID is required'
     });
   }
   

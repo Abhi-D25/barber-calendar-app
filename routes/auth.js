@@ -23,6 +23,7 @@ router.get('/auth/google', (req, res) => {
     scope: [
       'https://www.googleapis.com/auth/calendar',
       'https://www.googleapis.com/auth/calendar.events',
+      'https://www.googleapis.com/auth/forms',  // Add Forms API scope
       'profile',
       'email'
     ],
@@ -67,12 +68,22 @@ router.get('/auth/google/callback', async (req, res) => {
       const barberName = req.session.barberName || data.name;
       
       // Update or create barber record in Supabase
-      await barberOps.updateOrCreate({
+      const barber = await barberOps.updateOrCreate({
         phone_number: req.session.phoneNumber,
         name: barberName,
         email: data.email,
         refresh_token: tokens.refresh_token
       });
+      
+      // After creating/updating a barber, update the form dropdown
+      if (barber && process.env.GOOGLE_FORM_ID && process.env.GOOGLE_FORM_BARBER_QUESTION_ID) {
+        try {
+          await updateFormBarberDropdown(tokens.refresh_token);
+        } catch (formError) {
+          console.error('Failed to update form dropdown:', formError);
+          // Non-critical error, continue with registration
+        }
+      }
     } else {
       // Display a message that phone number is required
       return res.render('error', { 
@@ -86,6 +97,208 @@ router.get('/auth/google/callback', async (req, res) => {
   } catch (error) {
     console.error('OAuth callback error:', error);
     res.render('error', { message: 'Authentication failed. Please try again.' });
+  }
+});
+
+// New function to update the form dropdown
+async function updateFormBarberDropdown(refreshToken) {
+  try {
+    // Create new OAuth client with the refresh token
+    const formOAuth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.REDIRECT_URI
+    );
+    
+    formOAuth2Client.setCredentials({
+      refresh_token: refreshToken
+    });
+    
+    // Create Forms API client
+    const forms = google.forms({
+      version: 'v1',
+      auth: formOAuth2Client
+    });
+    
+    // Get all barbers from database
+    const allBarbers = await barberOps.getAllBarbers();
+    
+    if (!allBarbers || allBarbers.length === 0) {
+      console.log('No barbers found to update form dropdown');
+      return;
+    }
+    
+    // Get current form structure
+    const form = await forms.forms.get({
+      formId: process.env.GOOGLE_FORM_ID
+    });
+    
+    // Find the target question (barber selection dropdown)
+    const targetQuestion = form.data.items.find(item => 
+      item.questionItem && 
+      item.questionItem.question.questionId === process.env.GOOGLE_FORM_BARBER_QUESTION_ID
+    );
+    
+    if (!targetQuestion) {
+      console.error('Target question not found in form');
+      return;
+    }
+    
+    // Prepare barber names for dropdown
+    const barberNames = allBarbers.map(barber => barber.name).sort();
+    
+    // Update the dropdown options
+    const updateRequest = {
+      requests: [{
+        updateItem: {
+          item: {
+            itemId: targetQuestion.itemId,
+            questionItem: {
+              question: {
+                questionId: process.env.GOOGLE_FORM_BARBER_QUESTION_ID,
+                choiceQuestion: {
+                  type: 'DROP_DOWN',
+                  options: barberNames.map(name => ({
+                    value: name
+                  }))
+                }
+              }
+            }
+          },
+          location: {
+            index: targetQuestion.location.index
+          },
+          updateMask: 'questionItem.question.choiceQuestion.options'
+        }
+      }]
+    };
+    
+    // Perform the update
+    await forms.forms.batchUpdate({
+      formId: process.env.GOOGLE_FORM_ID,
+      requestBody: updateRequest
+    });
+    
+    console.log('Successfully updated form dropdown with barbers:', barberNames);
+    return true;
+  } catch (error) {
+    console.error('Error updating form dropdown:', error);
+    throw error;
+  }
+}
+
+// Add method to get form structure (useful for setup)
+router.get('/get-form-info', async (req, res) => {
+  // Only allow in development mode
+  if (process.env.NODE_ENV !== 'development') {
+    return res.status(403).send('This endpoint is only available in development mode');
+  }
+  
+  const { formId } = req.query;
+  
+  if (!formId) {
+    return res.status(400).send('Form ID is required');
+  }
+  
+  try {
+    // Get a refresh token from a barber (could also use admin token)
+    const { data: barber } = await barberOps.getFirstWithRefreshToken();
+    
+    if (!barber || !barber.refresh_token) {
+      return res.status(404).send('No barber with refresh token found');
+    }
+    
+    // Set up OAuth client with the refresh token
+    const formOAuth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.REDIRECT_URI
+    );
+    
+    formOAuth2Client.setCredentials({
+      refresh_token: barber.refresh_token
+    });
+    
+    // Create Forms API client
+    const forms = google.forms({
+      version: 'v1',
+      auth: formOAuth2Client
+    });
+    
+    // Get form structure
+    const form = await forms.forms.get({
+      formId: formId
+    });
+    
+    // Format the response to highlight questions and IDs
+    const formattedQuestions = form.data.items
+      .filter(item => item.questionItem)
+      .map(item => {
+        const question = item.questionItem.question;
+        let type = 'Unknown';
+        
+        if (question.textQuestion) type = 'Text';
+        if (question.choiceQuestion) {
+          if (question.choiceQuestion.type === 'DROP_DOWN') type = 'Dropdown';
+          if (question.choiceQuestion.type === 'RADIO') type = 'Multiple Choice';
+          if (question.choiceQuestion.type === 'CHECKBOX') type = 'Checkboxes';
+          type = question.choiceQuestion.type || type;
+        }
+        
+        return {
+          title: item.title,
+          questionId: question.questionId,
+          type: type,
+          itemId: item.itemId,
+          index: item.location.index
+        };
+      });
+    
+    res.json({
+      formId: form.data.formId,
+      title: form.data.info.title,
+      questions: formattedQuestions
+    });
+  } catch (error) {
+    console.error('Error getting form info:', error);
+    res.status(500).send(`Error getting form info: ${error.message}`);
+  }
+});
+
+// Add method to manually update form dropdown
+router.post('/update-form-dropdown', async (req, res) => {
+  const { formId, questionId } = req.body;
+  
+  if (!formId || !questionId) {
+    return res.status(400).json({
+      success: false,
+      error: 'Form ID and Question ID are required'
+    });
+  }
+  
+  try {
+    // Get a refresh token from a barber (could also use admin token)
+    const { data: barber } = await barberOps.getFirstWithRefreshToken();
+    
+    if (!barber || !barber.refresh_token) {
+      return res.status(404).json({
+        success: false,
+        error: 'No barber with refresh token found'
+      });
+    }
+    
+    await updateFormBarberDropdown(barber.refresh_token);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Form dropdown updated successfully'
+    });
+  } catch (error) {
+    console.error('Manual form update error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 

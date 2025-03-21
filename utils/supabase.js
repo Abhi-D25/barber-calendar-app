@@ -91,6 +91,35 @@ const barberOps = {
     }
     
     return data[0];
+  },
+
+  async getAllBarbers() {
+    const { data, error } = await supabase
+      .from('barbers')
+      .select('id, name')
+      .order('name', { ascending: true });
+      
+    if (error) {
+      console.error('Error fetching all barbers:', error);
+      return [];
+    }
+    
+    return data;
+  },
+  
+  async getFirstWithRefreshToken() {
+    const { data, error } = await supabase
+      .from('barbers')
+      .select('*')
+      .not('refresh_token', 'is', null)
+      .limit(1);
+      
+    if (error) {
+      console.error('Error fetching barber with refresh token:', error);
+      return { data: null, error };
+    }
+    
+    return { data: data[0], error: null };
   }
 };
 

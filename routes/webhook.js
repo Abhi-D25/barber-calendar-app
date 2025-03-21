@@ -924,6 +924,103 @@ router.post('/check-availability', async (req, res) => {
   }
 });
 
+router.post('/register-client', async (req, res) => {
+  const {
+    clientName,
+    clientPhone,
+    preferredBarberName // This will come from the Google Form selection
+  } = req.body;
+
+  console.log('Client registration webhook received:', { 
+    clientName, 
+    clientPhone, 
+    preferredBarberName 
+  });
+
+  // Validate required fields
+  if (!clientName || !clientPhone || !preferredBarberName) {
+    return res.status(400).json({
+      success: false,
+      error: 'Client name, phone number, and preferred barber are required'
+    });
+  }
+
+  try {
+    // Format phone number to ensure it has +1 format
+    let formattedPhone = clientPhone;
+    if (!formattedPhone.startsWith('+')) {
+      // Remove any non-digit characters
+      const digits = formattedPhone.replace(/\D/g, '');
+      
+      // Add +1 if needed
+      if (digits.length === 10) {
+        formattedPhone = `+1${digits}`;
+      } else if (digits.length === 11 && digits.startsWith('1')) {
+        formattedPhone = `+${digits}`;
+      } else {
+        // Invalid phone format
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid phone number format'
+        });
+      }
+    }
+
+    // Step 1: Find the barber by name
+    const { data: barber, error: barberError } = await supabase
+      .from('barbers')
+      .select('id, name')
+      .ilike('name', `%${preferredBarberName}%`) // Case-insensitive search
+      .single();
+
+    if (barberError || !barber) {
+      return res.status(404).json({
+        success: false,
+        error: 'Preferred barber not found',
+        details: barberError
+      });
+    }
+
+    // Step 2: Check if client already exists
+    const existingClient = await clientOps.getByPhoneNumber(formattedPhone);
+
+    // Step 3: Create or update the client
+    const clientData = {
+      phone_number: formattedPhone,
+      name: clientName,
+      preferred_barber_id: barber.id
+    };
+
+    const updatedClient = await clientOps.createOrUpdate(clientData);
+    
+    if (!updatedClient) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to create or update client record'
+      });
+    }
+
+    // Return success with client and barber info
+    return res.status(200).json({
+      success: true,
+      message: existingClient ? 'Client updated successfully' : 'Client registered successfully',
+      client: updatedClient,
+      barber: {
+        id: barber.id,
+        name: barber.name
+      }
+    });
+  } catch (error) {
+    console.error('Client registration error:', error);
+    
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
 // Helper function to create a new event
 function parsePacificDateTime(dateTimeString) {
   // Clean the date string to remove milliseconds if present

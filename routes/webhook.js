@@ -527,10 +527,21 @@ async function handleRescheduleClientAppointment(calendar, calendarId, eventId, 
       );
       
       if (!foundEvent) {
-        return res.status(404).json({
-          success: false,
-          error: `No matching event found for client "${searchTerm}"`
-        });
+        // If no event found and we're trying to reschedule, create a new appointment instead
+        console.log(`No existing event found for client "${searchTerm}", creating new appointment`);
+        return await handleCreateClientAppointment(
+          calendar,
+          calendarId,
+          {
+            clientPhone,
+            clientName,
+            serviceType: 'Appointment',
+            startDateTime: newStartDateTime,
+            duration,
+            notes: 'Created from reschedule request'
+          },
+          res
+        );
       }
       
       eventId = foundEvent.id;
@@ -545,10 +556,21 @@ async function handleRescheduleClientAppointment(calendar, calendarId, eventId, 
         });
       } catch (getErr) {
         if (getErr.response && getErr.response.status === 404) {
-          return res.status(404).json({
-            success: false,
-            error: 'Event not found with the provided ID'
-          });
+          // If event not found and we're trying to reschedule, create a new appointment instead
+          console.log(`Event with ID ${eventId} not found, creating new appointment`);
+          return await handleCreateClientAppointment(
+            calendar,
+            calendarId,
+            {
+              clientPhone,
+              clientName,
+              serviceType: 'Appointment',
+              startDateTime: newStartDateTime,
+              duration,
+              notes: 'Created from reschedule request'
+            },
+            res
+          );
         }
         throw getErr;
       }

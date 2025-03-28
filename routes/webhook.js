@@ -162,25 +162,51 @@ async function processClientMessage(clientPhone, messageText, client) {
       content: messageText
     });
     
-    console.log('Sending request to OpenAI with messages:', messages);
+    console.log('Sending request to OpenAI with messages:', JSON.stringify(messages, null, 2));
     
-    // Call OpenAI API
-    const response = await openai.chat.completions.create({
-      model: "gpt-4", // Use appropriate model
-      messages: messages,
-      response_format: { type: "json_object" }
-    });
-    
-    console.log('Received OpenAI response:', response);
+    // Call OpenAI API with error handling
+    let response;
+    try {
+      response = await openai.chat.completions.create({
+        model: "gpt-4",
+        messages: messages,
+        response_format: { type: "json_object" },
+        temperature: 0.7
+      });
+      
+      console.log('Received OpenAI response:', JSON.stringify(response, null, 2));
+    } catch (openaiError) {
+      console.error('OpenAI API error:', {
+        message: openaiError.message,
+        response: openaiError.response?.data,
+        status: openaiError.response?.status
+      });
+      throw openaiError;
+    }
     
     // Parse the JSON response
-    const aiResponse = JSON.parse(response.choices[0].message.content);
-    
-    console.log('Parsed AI response:', aiResponse);
+    let aiResponse;
+    try {
+      aiResponse = JSON.parse(response.choices[0].message.content);
+      console.log('Parsed AI response:', JSON.stringify(aiResponse, null, 2));
+    } catch (parseError) {
+      console.error('Error parsing OpenAI response:', parseError);
+      throw new Error('Invalid response format from OpenAI');
+    }
     
     // Ensure message field exists
     if (!aiResponse.message) {
       aiResponse.message = "I'll help you with that. Let me check our system.";
+    }
+    
+    // For booking requests, ensure we have the necessary data
+    if (aiResponse.is_booking_request) {
+      aiResponse.action = 'availability_check';
+      aiResponse.data = {
+        startDateTime: aiResponse.extracted_date && aiResponse.extracted_time 
+          ? `${aiResponse.extracted_date}T${aiResponse.extracted_time}:00-0700`
+          : null
+      };
     }
     
     return aiResponse;

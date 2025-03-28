@@ -10,6 +10,39 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
+// Test endpoint to check database contents
+router.get('/test-db', async (req, res) => {
+  try {
+    // Get all barbers
+    const { data: barbers, error: barberError } = await supabase
+      .from('barbers')
+      .select('*');
+      
+    if (barberError) {
+      console.error('Error fetching barbers:', barberError);
+      return res.status(500).json({ error: 'Failed to fetch barbers' });
+    }
+    
+    // Get all clients
+    const { data: clients, error: clientError } = await supabase
+      .from('clients')
+      .select('*');
+      
+    if (clientError) {
+      console.error('Error fetching clients:', clientError);
+      return res.status(500).json({ error: 'Failed to fetch clients' });
+    }
+    
+    return res.status(200).json({
+      barbers,
+      clients
+    });
+  } catch (error) {
+    console.error('Test endpoint error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 // Create OAuth2 client
 const createOAuth2Client = (refreshToken) => {
   const oauth2Client = new google.auth.OAuth2(

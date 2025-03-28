@@ -2,6 +2,13 @@ const express = require('express');
 const router = express.Router();
 const { google } = require('googleapis');
 const { barberOps, clientOps, appointmentOps, supabase } = require('../utils/supabase');
+const axios = require('axios');
+const { OpenAI } = require('openai'); // Make sure to install this package
+
+// Initialize OpenAI
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 // Create OAuth2 client
 const createOAuth2Client = (refreshToken) => {
@@ -17,6 +24,239 @@ const createOAuth2Client = (refreshToken) => {
   
   return oauth2Client;
 };
+
+// New function: Store conversation message
+async function storeConversationMessage(clientPhone, sender, message) {
+  try {
+    // Get current conversation or create empty array
+    const { data: client } = await supabase
+      .from('clients')
+      .select('conversation_history')
+      .eq('phone_number', clientPhone)
+      .single();
+    
+    const conversationHistory = client?.conversation_history || [];
+    
+    // Add new message with timestamp
+    conversationHistory.push({
+      sender,
+      message,
+      timestamp: new Date().toISOString()
+    });
+    
+    // Keep only last 20 messages to prevent excessive storage
+    const trimmedHistory = conversationHistory.slice(-20);
+    
+    // Update client record
+    const { error } = await supabase
+      .from('clients')
+      .update({ 
+        conversation_history: trimmedHistory,
+        updated_at: new Date()
+      })
+      .eq('phone_number', clientPhone);
+    
+    if (error) {
+      console.error('Error storing conversation:', error);
+      throw error;
+    }
+    
+    return trimmedHistory;
+  } catch (error) {
+    console.error('Error in storeConversationMessage:', error);
+    throw error;
+  }
+}
+
+// New function: Process client message with AI
+async function processClientMessage(clientPhone, messageText, client) {
+  try {
+    // Get conversation history
+    const { data: clientData } = await supabase
+      .from('clients')
+      .select('conversation_history')
+      .eq('phone_number', clientPhone)
+      .single();
+    
+    const conversationHistory = clientData?.conversation_history || [];
+    
+    // Format conversation for OpenAI
+    const messages = [
+      {
+        role: "system",
+        content: `You are an AI assistant for a barbershop. Your job is to help clients book, reschedule, or cancel appointments.
+                 Analyze the conversation history and the client's most recent message.
+                 Return a JSON object with the following structure:
+                 {
+                   "is_booking_request": true/false,
+                   "extracted_date": "YYYY-MM-DD or null if unclear",
+                   "extracted_time": "HH:MM or null if unclear",
+                   "extracted_date_raw": "Monday, Tuesday, etc. or null",
+                   "extracted_time_raw": "exact time text from client message or null",
+                   "needs_clarification": true/false,
+                   "clarification_needed_for": ["date", "time", "both", or []],
+                   "needs_availability_check": true/false,
+                   "confirmation": true/false,
+                   "is_reschedule": true/false,
+                   "is_cancel": true/false,
+                   "message": "The response to send to the client",
+                   "action": "availability_check" or "book_appointment" or "reschedule" or "cancel" or null,
+                   "data": {} // Any additional data needed for the action
+                 }`
+      }
+    ];
+    
+    // Add conversation history
+    conversationHistory.forEach(msg => {
+      messages.push({
+        role: msg.sender === 'client' ? 'user' : 'assistant',
+        content: msg.message
+      });
+    });
+    
+    // Add the current message
+    messages.push({
+      role: 'user',
+      content: messageText
+    });
+    
+    // Call OpenAI API
+    const response = await openai.chat.completions.create({
+      model: "gpt-4", // Use appropriate model
+      messages: messages,
+      response_format: { type: "json_object" }
+    });
+    
+    // Parse the JSON response
+    const aiResponse = JSON.parse(response.choices[0].message.content);
+    
+    // Ensure message field exists
+    if (!aiResponse.message) {
+      aiResponse.message = "I'll help you with that. Let me check our system.";
+    }
+    
+    return aiResponse;
+  } catch (error) {
+    console.error('Error processing message with AI:', error);
+    // Return a fallback response
+    return {
+      message: "I'm having trouble processing your request. Please try again or contact the shop directly.",
+      action: null,
+      data: null
+    };
+  }
+}
+
+// New function: Handle actions from AI analysis
+async function handleActionWebhook(action, client, data) {
+  try {
+    switch(action) {
+      case 'availability_check':
+        // Call availability check endpoint
+        return await axios.post(`${process.env.API_URL || ''}/check-availability`, {
+          barberId: client.preferred_barber_id,
+          startDateTime: data.startDateTime,
+          endDateTime: data.endDateTime || new Date(new Date(data.startDateTime).getTime() + 30*60000).toISOString()
+        });
+        
+      case 'book_appointment':
+        // Call appointment booking endpoint
+        return await axios.post(`${process.env.API_URL || ''}/client-appointment`, {
+          clientPhone: client.phone_number,
+          clientName: client.name,
+          preferredBarberId: client.preferred_barber_id,
+          startDateTime: data.startDateTime,
+          duration: data.duration || 30,
+          notes: data.notes || ''
+        });
+        
+      case 'reschedule':
+        // Call reschedule endpoint
+        return await axios.post(`${process.env.API_URL || ''}/client-appointment`, {
+          clientPhone: client.phone_number,
+          clientName: client.name,
+          preferredBarberId: client.preferred_barber_id,
+          isRescheduling: true,
+          startDateTime: data.currentDateTime,
+          newStartDateTime: data.newDateTime,
+          duration: data.duration || 30
+        });
+        
+      case 'cancel':
+        // Call cancel endpoint
+        return await axios.post(`${process.env.API_URL || ''}/client-appointment`, {
+          clientPhone: client.phone_number,
+          clientName: client.name,
+          isCancelling: true,
+          startDateTime: data.appointmentDateTime
+        });
+        
+      default:
+        return null;
+    }
+  } catch (error) {
+    console.error(`Error handling action webhook (${action}):`, error);
+    return null;
+  }
+}
+
+// New endpoint: Handle SMS from Twilio
+router.post('/sms-webhook', async (req, res) => {
+  // Twilio sends parameters as form data
+  const clientPhone = req.body.From;
+  const messageText = req.body.Body;
+  
+  console.log('SMS received:', { clientPhone, messageText });
+  
+  try {
+    // Get client details
+    const client = await clientOps.getByPhoneNumber(clientPhone);
+    
+    if (!client || !client.preferred_barber_id) {
+      // Handle new client or client without preferred barber
+      console.log('Unknown client or no preferred barber:', clientPhone);
+      return res.status(200).send(`
+        <Response>
+          <Message>Thanks for your message! To book an appointment, please register with one of our barbers first by visiting our website.</Message>
+        </Response>
+      `);
+    }
+    
+    // Store message in conversation history
+    await storeConversationMessage(clientPhone, 'client', messageText);
+    
+    // Process the message with AI
+    const aiResponse = await processClientMessage(clientPhone, messageText, client);
+    
+    // Store AI response in conversation history
+    await storeConversationMessage(clientPhone, 'system', aiResponse.message);
+    
+    // Send response to client
+    res.status(200).send(`
+      <Response>
+        <Message>${aiResponse.message}</Message>
+      </Response>
+    `);
+    
+    // Handle any actions from the AI response
+    if (aiResponse.action) {
+      try {
+        await handleActionWebhook(aiResponse.action, client, aiResponse.data || {});
+      } catch (actionError) {
+        console.error('Error handling action:', actionError);
+      }
+    }
+  } catch (error) {
+    console.error('Error processing SMS:', error);
+    
+    // Send error response
+    res.status(200).send(`
+      <Response>
+        <Message>Sorry, we're experiencing technical difficulties. Please try again later or call us directly.</Message>
+      </Response>
+    `);
+  }
+});
 
 // Find event by client name and approximate date
 async function findEventByClientName(calendar, calendarId, clientName, appointmentDate) {
@@ -410,7 +650,6 @@ async function handleCreateClientAppointment(calendar, calendarId, data, res) {
   });
 }
 
-// Helper function for cancelling client appointments
 // Helper function for cancelling client appointments
 async function handleCancelClientAppointment(calendar, calendarId, eventId, clientName, clientPhone, startDateTime, res) {
   try {
@@ -1304,7 +1543,7 @@ async function handleRescheduleEvent(calendar, calendarId, eventId, data, res) {
       console.log(`Original event duration: ${eventDuration} minutes`);
     }
     
-    const startTime = parsePacificDateTime(newStartDateTime);
+    const startTime = parsePacificDateTime(startDateTime);
     const endTime = new Date(startTime.getTime() + (eventDuration * 60000));
 
     // Prepare updated event details - keep everything except the times

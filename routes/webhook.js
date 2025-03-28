@@ -71,12 +71,21 @@ async function storeConversationMessage(clientPhone, sender, message) {
 // New function: Process client message with AI
 async function processClientMessage(clientPhone, messageText, client) {
   try {
+    console.log('Processing message for client:', { clientPhone, messageText, client });
+    
     // Get conversation history
-    const { data: clientData } = await supabase
+    const { data: clientData, error: clientError } = await supabase
       .from('clients')
       .select('conversation_history')
       .eq('phone_number', clientPhone)
       .single();
+    
+    if (clientError) {
+      console.error('Error fetching client data:', clientError);
+      throw clientError;
+    }
+    
+    console.log('Retrieved client data:', clientData);
     
     const conversationHistory = clientData?.conversation_history || [];
     
@@ -120,6 +129,8 @@ async function processClientMessage(clientPhone, messageText, client) {
       content: messageText
     });
     
+    console.log('Sending request to OpenAI with messages:', messages);
+    
     // Call OpenAI API
     const response = await openai.chat.completions.create({
       model: "gpt-4", // Use appropriate model
@@ -127,8 +138,12 @@ async function processClientMessage(clientPhone, messageText, client) {
       response_format: { type: "json_object" }
     });
     
+    console.log('Received OpenAI response:', response);
+    
     // Parse the JSON response
     const aiResponse = JSON.parse(response.choices[0].message.content);
+    
+    console.log('Parsed AI response:', aiResponse);
     
     // Ensure message field exists
     if (!aiResponse.message) {
@@ -137,7 +152,11 @@ async function processClientMessage(clientPhone, messageText, client) {
     
     return aiResponse;
   } catch (error) {
-    console.error('Error processing message with AI:', error);
+    console.error('Detailed error in processClientMessage:', {
+      error: error.message,
+      stack: error.stack,
+      response: error.response?.data
+    });
     // Return a fallback response
     return {
       message: "I'm having trouble processing your request. Please try again or contact the shop directly.",
@@ -211,6 +230,7 @@ router.post('/sms-webhook', async (req, res) => {
   try {
     // Get client details
     const client = await clientOps.getByPhoneNumber(clientPhone);
+    console.log('Retrieved client:', client);
     
     if (!client || !client.preferred_barber_id) {
       // Handle new client or client without preferred barber
@@ -224,12 +244,15 @@ router.post('/sms-webhook', async (req, res) => {
     
     // Store message in conversation history
     await storeConversationMessage(clientPhone, 'client', messageText);
+    console.log('Stored client message in conversation history');
     
     // Process the message with AI
     const aiResponse = await processClientMessage(clientPhone, messageText, client);
+    console.log('AI response received:', aiResponse);
     
     // Store AI response in conversation history
     await storeConversationMessage(clientPhone, 'system', aiResponse.message);
+    console.log('Stored AI response in conversation history');
     
     // Send response to client
     res.status(200).send(`
@@ -241,13 +264,18 @@ router.post('/sms-webhook', async (req, res) => {
     // Handle any actions from the AI response
     if (aiResponse.action) {
       try {
+        console.log('Handling AI action:', aiResponse.action);
         await handleActionWebhook(aiResponse.action, client, aiResponse.data || {});
       } catch (actionError) {
         console.error('Error handling action:', actionError);
       }
     }
   } catch (error) {
-    console.error('Error processing SMS:', error);
+    console.error('Detailed error in SMS webhook:', {
+      error: error.message,
+      stack: error.stack,
+      response: error.response?.data
+    });
     
     // Send error response
     res.status(200).send(`

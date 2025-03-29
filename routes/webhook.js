@@ -165,7 +165,7 @@ router.post('/create-event', async (req, res) => {
         return await handleCreateEvent(calendar, calendarId, req.body, barber, res);
       
       case 'cancel':
-        return await handleCancelEvent(calendar, calendarId, eventId, clientName, startDateTime, res);
+        return await handleCancelEvent(calendar, calendarId, eventId, clientName, res);
       
       case 'reschedule':
         return await handleRescheduleEvent(calendar, calendarId, eventId, req.body, res);
@@ -294,7 +294,6 @@ router.post('/client-appointment', async (req, res) => {
         eventId, 
         clientName || client?.name, 
         clientPhone,
-        startDateTime, 
         res
       );
     } else if (isRescheduling) {
@@ -430,8 +429,7 @@ async function handleCancelClientAppointment(calendar, calendarId, eventId, clie
       eventToCancel = await findEventByClientName(
         calendar, 
         calendarId, 
-        searchTerm, 
-        startDateTime ? new Date(startDateTime) : null
+        searchTerm
       );
       
       if (!eventToCancel) {
@@ -1160,7 +1158,7 @@ async function handleCreateEvent(calendar, calendarId, data, barber, res) {
 }
 
 // Helper function to cancel an event
-async function handleCancelEvent(calendar, calendarId, eventId, clientName, startDateTime, res) {
+async function handleCancelEvent(calendar, calendarId, eventId, clientName, res) {
   try {
     // If no eventId is provided, try to find by client name
     let eventToCancel = null;

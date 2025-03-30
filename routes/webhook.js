@@ -1478,4 +1478,58 @@ function formatConversationForOpenAI(conversationHistory) {
   return formattedConversation;
 }
 
+// Endpoint to delete conversation history for a client
+router.post('/delete-conversation', async (req, res) => {
+  const { clientPhone } = req.body;
+  
+  console.log('Delete conversation request received:', { clientPhone });
+  
+  if (!clientPhone) {
+    return res.status(400).json({
+      success: false,
+      error: 'Client phone number is required'
+    });
+  }
+  
+  try {
+    // Update the client record to clear conversation history
+    const { data, error } = await supabase
+      .from('clients')
+      .update({ 
+        conversation_history: [],
+        updated_at: new Date()
+      })
+      .eq('phone_number', clientPhone)
+      .select();
+      
+    if (error) {
+      console.error('Error deleting conversation:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to delete conversation history'
+      });
+    }
+    
+    if (!data || data.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Client not found'
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Conversation history deleted successfully',
+      client: data[0]
+    });
+    
+  } catch (error) {
+    console.error('Delete conversation error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;

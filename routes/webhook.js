@@ -1532,4 +1532,85 @@ router.post('/delete-conversation', async (req, res) => {
   }
 });
 
+// Endpoint to get a client's preferred barber
+router.get('/get-preferred-barber', async (req, res) => {
+  const clientPhone = req.query.phone;
+  
+  console.log('Get preferred barber request received:', { clientPhone });
+  
+  if (!clientPhone) {
+    return res.status(400).json({
+      success: false,
+      error: 'Phone number is required'
+    });
+  }
+  
+  try {
+    // Format phone number to ensure consistent matching
+    let formattedPhone = clientPhone;
+    if (!formattedPhone.startsWith('+')) {
+      // Remove any non-digit characters
+      const digits = formattedPhone.replace(/\D/g, '');
+      
+      // Add +1 if needed
+      if (digits.length === 10) {
+        formattedPhone = `+1${digits}`;
+      } else if (digits.length === 11 && digits.startsWith('1')) {
+        formattedPhone = `+${digits}`;
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid phone number format'
+        });
+      }
+    }
+    
+    // Query to get the preferred barber's details using Supabase
+    const { data, error } = await supabase
+      .from('clients')
+      .select(`
+        preferred_barber:barbers (
+          id,
+          name,
+          phone_number
+        )
+      `)
+      .eq('phone_number', formattedPhone)
+      .single();
+    
+    if (error) {
+      console.error('Error fetching preferred barber:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to fetch preferred barber'
+      });
+    }
+    
+    if (!data || !data.preferred_barber) {
+      return res.status(200).json({
+        success: true,
+        found: false,
+        message: 'No preferred barber found for this client'
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      found: true,
+      barber: {
+        id: data.preferred_barber.id,
+        name: data.preferred_barber.name,
+        phone: data.preferred_barber.phone_number
+      }
+    });
+    
+  } catch (error) {
+    console.error('Get preferred barber error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;

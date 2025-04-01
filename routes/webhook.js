@@ -229,6 +229,42 @@ router.post('/client-appointment', async (req, res) => {
     });
   }
 
+  // =========== ADD THIS NEW CODE HERE ===========
+  // Check if this might be a quick modification of a recent booking
+  if (!isCancelling && !isRescheduling && startDateTime) {
+    try {
+      // Look for a booking made in the last 10 minutes
+      const recentBookingResponse = await fetch(`${req.protocol}://${req.get('host')}/webhook/check-recent-booking?clientPhone=${encodeURIComponent(clientPhone)}&timeWindowMinutes=10`);
+      const recentBookingData = await recentBookingResponse.json();
+      
+      // If there's a recent booking, treat this as a reschedule instead
+      if (recentBookingData.success && recentBookingData.hasRecentBooking) {
+        const recentBooking = recentBookingData.recentBooking;
+        
+        console.log(`Detected potential modification of recent booking:`, {
+          original: recentBooking.start_time,
+          new: startDateTime
+        });
+        
+        // If the new time is within 2 hours of the original time, treat as reschedule
+        const originalDate = new Date(recentBooking.start_time);
+        const newDate = new Date(startDateTime);
+        const timeDifference = Math.abs(newDate - originalDate) / (60 * 1000); // Difference in minutes
+        
+        if (timeDifference <= 120) { // 2 hours or less
+          console.log(`Treating as reschedule of recent booking (time difference: ${timeDifference} minutes)`);
+          
+          // Set flags for rescheduling
+          isRescheduling = true;
+          eventId = recentBooking.google_calendar_event_id;
+        }
+      }
+    } catch (error) {
+      console.error('Error checking for recent booking:', error);
+      // Continue with normal booking flow if check fails
+    }
+  }
+
   try {
     // Get client details from the database
     let client = await clientOps.getByPhoneNumber(clientPhone);
@@ -334,6 +370,57 @@ router.post('/client-appointment', async (req, res) => {
       error: error.message,
       stack: error.stack,
       details: error.response?.data || 'Unknown error'
+    });
+  }
+});
+
+// New endpoint to check for recent bookings
+router.get('/check-recent-booking', async (req, res) => {
+  const { clientPhone, timeWindowMinutes = 10 } = req.query;
+  
+  if (!clientPhone) {
+    return res.status(400).json({
+      success: false,
+      error: 'Client phone number is required'
+    });
+  }
+  
+  try {
+    // Calculate the time threshold (e.g., 10 minutes ago)
+    const timeThreshold = new Date();
+    timeThreshold.setMinutes(timeThreshold.getMinutes() - parseInt(timeWindowMinutes, 10));
+    
+    // Get recent appointments for this client
+    const { data, error } = await supabase
+      .from('appointments')
+      .select('*')
+      .eq('client_phone', clientPhone)
+      .gt('created_at', timeThreshold.toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1);
+      
+    if (error) {
+      console.error('Error checking recent booking:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to check recent booking'
+      });
+    }
+    
+    // Check if we found a recent booking
+    const hasRecentBooking = data && data.length > 0;
+    
+    return res.status(200).json({
+      success: true,
+      hasRecentBooking,
+      recentBooking: hasRecentBooking ? data[0] : null,
+      timeWindow: `${timeWindowMinutes} minutes`
+    });
+  } catch (error) {
+    console.error('Error checking recent booking:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });

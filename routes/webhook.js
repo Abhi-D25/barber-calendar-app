@@ -1613,4 +1613,290 @@ router.get('/get-preferred-barber', async (req, res) => {
   }
 });
 
+router.post('/batch-messages', async (req, res) => {
+  const { 
+    clientPhone, 
+    message, 
+    messageId,
+    waitForMore = true
+  } = req.body;
+  
+  console.log('Message batch request received:', { 
+    clientPhone, 
+    messageLength: message?.length,
+    messageId,
+    waitForMore
+  });
+  
+  if (!clientPhone || !message) {
+    return res.status(400).json({
+      success: false,
+      error: 'Client phone and message are required'
+    });
+  }
+  
+  try {
+    // Store this message in temporary batch storage
+    const timestamp = new Date().toISOString();
+    
+    // Store in a new table or use client.message_batch field
+    const { data: client, error } = await supabase
+      .from('clients')
+      .select('message_batch, conversation_history')
+      .eq('phone_number', clientPhone)
+      .single();
+    
+    // Initialize or update message batch
+    let messageBatch = client?.message_batch || [];
+    
+    // Add this message to the batch
+    messageBatch.push({
+      message,
+      messageId,
+      timestamp
+    });
+    
+    // Update the client record with the new batch
+    await supabase
+      .from('clients')
+      .update({ 
+        message_batch: messageBatch,
+        updated_at: new Date()
+      })
+      .eq('phone_number', clientPhone);
+    
+    // If we're not waiting for more messages, process the batch immediately
+    if (!waitForMore) {
+      // Combine all messages in the batch into one
+      const combinedMessage = messageBatch
+        .map(msg => msg.message)
+        .join(" ");
+      
+      // Store the combined message in conversation history
+      const conversationHistory = await storeConversationMessage(
+        clientPhone, 
+        'client', 
+        combinedMessage
+      );
+      
+      // Clear the message batch
+      await supabase
+        .from('clients')
+        .update({ 
+          message_batch: [],
+          updated_at: new Date()
+        })
+        .eq('phone_number', clientPhone);
+      
+      // Return the combined message and conversation history
+      return res.status(200).json({
+        success: true,
+        combinedMessage,
+        messageCount: messageBatch.length,
+        conversationHistory,
+        clientInfo: client || null
+      });
+    }
+    
+    // If we're waiting for more messages, just confirm storage
+    return res.status(200).json({
+      success: true,
+      status: 'message_batched',
+      batchSize: messageBatch.length
+    });
+  } catch (error) {
+    console.error('Error in message batching:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Endpoint to process batched messages
+router.post('/process-message-batch', async (req, res) => {
+  const { clientPhone } = req.body;
+  
+  if (!clientPhone) {
+    return res.status(400).json({
+      success: false,
+      error: 'Client phone is required'
+    });
+  }
+  
+  try {
+    // Get the client's message batch
+    const { data: client, error } = await supabase
+      .from('clients')
+      .select('message_batch, conversation_history')
+      .eq('phone_number', clientPhone)
+      .single();
+    
+    if (error) {
+      console.error('Error getting client batch:', error);
+      return res.status(404).json({
+        success: false,
+        error: 'Client not found'
+      });
+    }
+    
+    const messageBatch = client?.message_batch || [];
+    
+    if (messageBatch.length === 0) {
+      return res.status(200).json({
+        success: true,
+        status: 'no_messages',
+        conversationHistory: client?.conversation_history || []
+      });
+    }
+    
+    // Combine all messages in the batch
+    const combinedMessage = messageBatch
+      .map(msg => msg.message)
+      .join(" ");
+    
+    // Store the combined message in conversation history
+    const conversationHistory = await storeConversationMessage(
+      clientPhone, 
+      'client', 
+      combinedMessage
+    );
+    
+    // Clear the message batch
+    await supabase
+      .from('clients')
+      .update({ 
+        message_batch: [],
+        updated_at: new Date()
+      })
+      .eq('phone_number', clientPhone);
+    
+    // Return the combined message and conversation history
+    return res.status(200).json({
+      success: true,
+      combinedMessage,
+      messageCount: messageBatch.length,
+      conversationHistory,
+      clientInfo: client || null
+    });
+  } catch (error) {
+    console.error('Error processing message batch:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Check if a message has been processed
+router.post('/check-processed-message', async (req, res) => {
+  const { clientPhone, messageId } = req.body;
+  
+  if (!clientPhone || !messageId) {
+    return res.status(400).json({
+      success: false,
+      error: 'Client phone and message ID are required'
+    });
+  }
+  
+  try {
+    // Get client's processed messages
+    const { data, error } = await supabase
+      .from('clients')
+      .select('processed_messages')
+      .eq('phone_number', clientPhone)
+      .single();
+      
+    if (error && error.code !== 'PGRST116') {
+      console.error('Error checking processed message:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Database error'
+      });
+    }
+    
+    // Check if message ID is in processed array
+    const processedMessages = data?.processed_messages || [];
+    const processed = processedMessages.includes(messageId);
+    
+    return res.status(200).json({
+      success: true,
+      processed
+    });
+  } catch (error) {
+    console.error('Error checking processed message:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Mark a message as processed
+router.post('/mark-message-processed', async (req, res) => {
+  const { clientPhone, messageId } = req.body;
+  
+  if (!clientPhone || !messageId) {
+    return res.status(400).json({
+      success: false,
+      error: 'Client phone and message ID are required'
+    });
+  }
+  
+  try {
+    // Get client's current processed messages
+    const { data, error } = await supabase
+      .from('clients')
+      .select('processed_messages')
+      .eq('phone_number', clientPhone)
+      .single();
+      
+    // Initialize array or use existing
+    let processedMessages = [];
+    if (!error && data) {
+      processedMessages = data.processed_messages || [];
+    }
+    
+    // Add the message ID if it's not already there
+    if (!processedMessages.includes(messageId)) {
+      processedMessages.push(messageId);
+    }
+    
+    // Keep only the last 50 processed messages
+    if (processedMessages.length > 50) {
+      processedMessages = processedMessages.slice(-50);
+    }
+    
+    // Update the client record
+    const { data: updateData, error: updateError } = await supabase
+      .from('clients')
+      .upsert({
+        phone_number: clientPhone,
+        processed_messages: processedMessages,
+        updated_at: new Date()
+      }, { onConflict: 'phone_number' })
+      .select();
+      
+    if (updateError) {
+      console.error('Error marking message as processed:', updateError);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update database'
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      messageId,
+      processedCount: processedMessages.length
+    });
+  } catch (error) {
+    console.error('Error marking message as processed:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;

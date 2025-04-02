@@ -1613,54 +1613,56 @@ router.get('/get-preferred-barber', async (req, res) => {
   }
 });
 
-router.post('/track-message', async (req, res) => {
-  const { 
-    clientPhone, 
-    message
-  } = req.body;
+router.post('/save-sms-message', async (req, res) => {
+  const { clientPhone, message } = req.body;
   
-  if (!clientPhone) {
-    return res.status(400).json({
-      success: false,
-      error: 'Client phone number is required'
-    });
+  if (!clientPhone || !message) {
+    return res.status(400).json({ success: false, error: 'Phone and message required' });
   }
   
   try {
-    // Get current timestamp
-    const currentTime = new Date().toISOString();
+    // Get existing client data
+    const { data: existingClient } = await supabase
+      .from('clients')
+      .select('conversation_history')
+      .eq('phone_number', clientPhone)
+      .single();
     
-    // Update client with last_message_timestamp
+    // Create or update conversation history
+    const conversationHistory = existingClient?.conversation_history || [];
+    
+    // Add new message
+    conversationHistory.push({
+      sender: 'client',
+      message: message,
+      timestamp: new Date().toISOString()
+    });
+    
+    // Update client record with new message and timestamp
     const { data, error } = await supabase
       .from('clients')
       .upsert({
         phone_number: clientPhone,
-        last_message_timestamp: currentTime,
-        updated_at: currentTime
+        conversation_history: conversationHistory,
+        last_message_timestamp: new Date().toISOString()
       }, {
         onConflict: 'phone_number'
       })
       .select();
-      
+    
     if (error) {
-      console.error('Error updating client:', error);
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to update client'
-      });
+      console.error('Error saving message:', error);
+      return res.status(500).json({ success: false, error: error.message });
     }
     
     return res.status(200).json({
       success: true,
-      timestamp: currentTime,
+      messageCount: conversationHistory.length,
       client: data[0]
     });
   } catch (error) {
-    console.error('Error tracking message:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    console.error('Save message error:', error);
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 

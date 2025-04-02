@@ -1613,59 +1613,6 @@ router.get('/get-preferred-barber', async (req, res) => {
   }
 });
 
-router.post('/save-sms-message', async (req, res) => {
-  const { clientPhone, message } = req.body;
-  
-  if (!clientPhone || !message) {
-    return res.status(400).json({ success: false, error: 'Phone and message required' });
-  }
-  
-  try {
-    // Get existing client data
-    const { data: existingClient } = await supabase
-      .from('clients')
-      .select('conversation_history')
-      .eq('phone_number', clientPhone)
-      .single();
-    
-    // Create or update conversation history
-    const conversationHistory = existingClient?.conversation_history || [];
-    
-    // Add new message
-    conversationHistory.push({
-      sender: 'client',
-      message: message,
-      timestamp: new Date().toISOString()
-    });
-    
-    // Update client record with new message and timestamp
-    const { data, error } = await supabase
-      .from('clients')
-      .upsert({
-        phone_number: clientPhone,
-        conversation_history: conversationHistory,
-        last_message_timestamp: new Date().toISOString()
-      }, {
-        onConflict: 'phone_number'
-      })
-      .select();
-    
-    if (error) {
-      console.error('Error saving message:', error);
-      return res.status(500).json({ success: false, error: error.message });
-    }
-    
-    return res.status(200).json({
-      success: true,
-      messageCount: conversationHistory.length,
-      client: data[0]
-    });
-  } catch (error) {
-    console.error('Save message error:', error);
-    return res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 router.post('/check-message-status', async (req, res) => {
   const { clientPhone, originalTimestamp } = req.body;
   
@@ -1768,8 +1715,8 @@ router.post('/check-message-status', async (req, res) => {
   }
 });
 
-router.post('/get-recent-messages', async (req, res) => {
-  const { clientPhone, timeWindowMinutes = 2 } = req.body;
+router.post('/get-temp-messages', async (req, res) => {
+  const { clientPhone, timeWindowMinutes = 5 } = req.body;
   
   if (!clientPhone) {
     return res.status(400).json({
@@ -1779,24 +1726,30 @@ router.post('/get-recent-messages', async (req, res) => {
   }
   
   try {
-    // Calculate time window
-    const timeWindowMs = timeWindowMinutes * 60 * 1000; // Convert to milliseconds
-    const cutoffTime = new Date(Date.now() - timeWindowMs).toISOString();
-    
-    // Get recent messages from your existing endpoint
-    const { data: messagesData } = await supabase
+    // Get client's temp messages
+    const { data: client } = await supabase
       .from('clients')
-      .select('conversation_history')
+      .select('temp_messages')
       .eq('phone_number', clientPhone)
       .single();
     
-    const allMessages = messagesData?.conversation_history || [];
+    // If no temp messages exist
+    if (!client || !client.temp_messages || !Array.isArray(client.temp_messages)) {
+      return res.status(200).json({
+        success: true,
+        messages: [],
+        messageCount: 0,
+        combinedText: ""
+      });
+    }
     
-    // Filter to client messages within time window
-    const recentMessages = allMessages.filter(msg => {
-      return msg.sender === 'client' && 
-             msg.timestamp >= cutoffTime;
-    });
+    // Calculate time cutoff if needed
+    const cutoffTime = new Date(Date.now() - (timeWindowMinutes * 60 * 1000)).toISOString();
+    
+    // Filter by time window
+    const recentMessages = client.temp_messages.filter(msg => 
+      msg && typeof msg === 'object' && msg.timestamp >= cutoffTime
+    );
     
     // Combine messages
     const combinedText = recentMessages
@@ -1810,7 +1763,102 @@ router.post('/get-recent-messages', async (req, res) => {
       combinedText: combinedText
     });
   } catch (error) {
-    console.error('Error getting recent messages:', error);
+    console.error('Error getting temp messages:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+router.post('/temp-store-message', async (req, res) => {
+  const { clientPhone, message } = req.body;
+  
+  if (!clientPhone || !message) {
+    return res.status(400).json({ success: false, error: 'Phone and message required' });
+  }
+  
+  try {
+    // Get existing client data
+    const { data: existingClient } = await supabase
+      .from('clients')
+      .select('temp_messages, last_message_timestamp')
+      .eq('phone_number', clientPhone)
+      .single();
+    
+    // Create or update temporary messages
+    const tempMessages = existingClient?.temp_messages || [];
+    const currentTime = new Date().toISOString();
+    
+    // Add new message
+    tempMessages.push({
+      message: message,
+      timestamp: currentTime
+    });
+    
+    // Update client record with new temp message and timestamp
+    const { data, error } = await supabase
+      .from('clients')
+      .upsert({
+        phone_number: clientPhone,
+        temp_messages: tempMessages,
+        last_message_timestamp: currentTime
+      }, {
+        onConflict: 'phone_number'
+      })
+      .select();
+    
+    if (error) {
+      console.error('Error saving temp message:', error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      messageCount: tempMessages.length,
+      timestamp: currentTime,
+      client: data[0]
+    });
+  } catch (error) {
+    console.error('Save temp message error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.post('/clear-temp-messages', async (req, res) => {
+  const { clientPhone } = req.body;
+  
+  if (!clientPhone) {
+    return res.status(400).json({
+      success: false,
+      error: 'Client phone number is required'
+    });
+  }
+  
+  try {
+    // Update client to clear temp messages
+    const { data, error } = await supabase
+      .from('clients')
+      .update({
+        temp_messages: [] // Empty array
+      })
+      .eq('phone_number', clientPhone)
+      .select();
+    
+    if (error) {
+      console.error('Error clearing temp messages:', error);
+      return res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Temporary messages cleared'
+    });
+  } catch (error) {
+    console.error('Clear temp messages error:', error);
     return res.status(500).json({
       success: false,
       error: error.message

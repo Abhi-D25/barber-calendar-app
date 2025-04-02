@@ -229,42 +229,6 @@ router.post('/client-appointment', async (req, res) => {
     });
   }
 
-  // =========== ADD THIS NEW CODE HERE ===========
-  // Check if this might be a quick modification of a recent booking
-  if (!isCancelling && !isRescheduling && startDateTime) {
-    try {
-      // Look for a booking made in the last 10 minutes
-      const recentBookingResponse = await fetch(`${req.protocol}://${req.get('host')}/webhook/check-recent-booking?clientPhone=${encodeURIComponent(clientPhone)}&timeWindowMinutes=10`);
-      const recentBookingData = await recentBookingResponse.json();
-      
-      // If there's a recent booking, treat this as a reschedule instead
-      if (recentBookingData.success && recentBookingData.hasRecentBooking) {
-        const recentBooking = recentBookingData.recentBooking;
-        
-        console.log(`Detected potential modification of recent booking:`, {
-          original: recentBooking.start_time,
-          new: startDateTime
-        });
-        
-        // If the new time is within 2 hours of the original time, treat as reschedule
-        const originalDate = new Date(recentBooking.start_time);
-        const newDate = new Date(startDateTime);
-        const timeDifference = Math.abs(newDate - originalDate) / (60 * 1000); // Difference in minutes
-        
-        if (timeDifference <= 120) { // 2 hours or less
-          console.log(`Treating as reschedule of recent booking (time difference: ${timeDifference} minutes)`);
-          
-          // Set flags for rescheduling
-          isRescheduling = true;
-          eventId = recentBooking.google_calendar_event_id;
-        }
-      }
-    } catch (error) {
-      console.error('Error checking for recent booking:', error);
-      // Continue with normal booking flow if check fails
-    }
-  }
-
   try {
     // Get client details from the database
     let client = await clientOps.getByPhoneNumber(clientPhone);
@@ -370,57 +334,6 @@ router.post('/client-appointment', async (req, res) => {
       error: error.message,
       stack: error.stack,
       details: error.response?.data || 'Unknown error'
-    });
-  }
-});
-
-// New endpoint to check for recent bookings
-router.get('/check-recent-booking', async (req, res) => {
-  const { clientPhone, timeWindowMinutes = 10 } = req.query;
-  
-  if (!clientPhone) {
-    return res.status(400).json({
-      success: false,
-      error: 'Client phone number is required'
-    });
-  }
-  
-  try {
-    // Calculate the time threshold (e.g., 10 minutes ago)
-    const timeThreshold = new Date();
-    timeThreshold.setMinutes(timeThreshold.getMinutes() - parseInt(timeWindowMinutes, 10));
-    
-    // Get recent appointments for this client
-    const { data, error } = await supabase
-      .from('appointments')
-      .select('*')
-      .eq('client_phone', clientPhone)
-      .gt('created_at', timeThreshold.toISOString())
-      .order('created_at', { ascending: false })
-      .limit(1);
-      
-    if (error) {
-      console.error('Error checking recent booking:', error);
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to check recent booking'
-      });
-    }
-    
-    // Check if we found a recent booking
-    const hasRecentBooking = data && data.length > 0;
-    
-    return res.status(200).json({
-      success: true,
-      hasRecentBooking,
-      recentBooking: hasRecentBooking ? data[0] : null,
-      timeWindow: `${timeWindowMinutes} minutes`
-    });
-  } catch (error) {
-    console.error('Error checking recent booking:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message
     });
   }
 });
@@ -1700,99 +1613,134 @@ router.get('/get-preferred-barber', async (req, res) => {
   }
 });
 
-router.post('/batch-messages', async (req, res) => {
+router.post('/handle-consolidated-messages', async (req, res) => {
   const { 
     clientPhone, 
-    message, 
-    messageId,
-    waitForMore = true
+    consolidatedMessage,
+    messageIds = [] // Optional: Array of individual message IDs that were consolidated
   } = req.body;
   
-  console.log('Message batch request received:', { 
+  console.log('Consolidated message request received:', { 
     clientPhone, 
-    messageLength: message?.length,
-    messageId,
-    waitForMore
+    messageLength: consolidatedMessage?.length,
+    messageCount: messageIds.length 
   });
   
-  if (!clientPhone || !message) {
+  if (!clientPhone || !consolidatedMessage) {
     return res.status(400).json({
       success: false,
-      error: 'Client phone and message are required'
+      error: 'Client phone and consolidated message are required'
     });
   }
   
   try {
-    // Store this message in temporary batch storage
-    const timestamp = new Date().toISOString();
+    // Get client details from database
+    const client = await clientOps.getByPhoneNumber(clientPhone);
     
-    // Store in a new table or use client.message_batch field
-    const { data: client, error } = await supabase
+    // Flag for new clients
+    const isNewClient = !client || !client.preferred_barber_id;
+    
+    // Get current conversation history
+    const { data: clientData } = await supabase
       .from('clients')
-      .select('message_batch, conversation_history')
+      .select('conversation_history, last_booking_state')
       .eq('phone_number', clientPhone)
       .single();
     
-    // Initialize or update message batch
-    let messageBatch = client?.message_batch || [];
+    const conversationHistory = clientData?.conversation_history || [];
+    const lastBookingState = clientData?.last_booking_state || {};
     
-    // Add this message to the batch
-    messageBatch.push({
-      message,
-      messageId,
-      timestamp
+    // Add consolidated message to history
+    conversationHistory.push({
+      sender: 'client',
+      message: consolidatedMessage,
+      timestamp: new Date().toISOString(),
+      isConsolidated: true,
+      originalMessageCount: messageIds.length
     });
     
-    // Update the client record with the new batch
-    await supabase
-      .from('clients')
-      .update({ 
-        message_batch: messageBatch,
-        updated_at: new Date()
-      })
-      .eq('phone_number', clientPhone);
+    // Keep only last 20 messages to prevent excessive storage
+    const trimmedHistory = conversationHistory.slice(-20);
     
-    // If we're not waiting for more messages, process the batch immediately
-    if (!waitForMore) {
-      // Combine all messages in the batch into one
-      const combinedMessage = messageBatch
-        .map(msg => msg.message)
-        .join(" ");
-      
-      // Store the combined message in conversation history
-      const conversationHistory = await storeConversationMessage(
-        clientPhone, 
-        'client', 
-        combinedMessage
-      );
-      
-      // Clear the message batch
-      await supabase
+    // Update client record
+    if (client) {
+      const { error } = await supabase
         .from('clients')
         .update({ 
-          message_batch: [],
+          conversation_history: trimmedHistory,
           updated_at: new Date()
         })
         .eq('phone_number', clientPhone);
       
-      // Return the combined message and conversation history
-      return res.status(200).json({
-        success: true,
-        combinedMessage,
-        messageCount: messageBatch.length,
-        conversationHistory,
-        clientInfo: client || null
-      });
+      if (error) {
+        console.error('Error updating conversation:', error);
+        throw error;
+      }
+    } else {
+      // Create a minimal client record
+      const { error } = await supabase
+        .from('clients')
+        .insert({
+          phone_number: clientPhone,
+          conversation_history: trimmedHistory
+        });
+      
+      if (error) {
+        console.error('Error creating client for conversation:', error);
+        throw error;
+      }
     }
     
-    // If we're waiting for more messages, just confirm storage
+    // Get the latest client info with preferred barber for returning to Zapier
+    let clientInfo = client;
+    if (client && client.preferred_barber_id) {
+      const { data, error } = await supabase
+        .from('clients')
+        .select(`
+          *,
+          preferred_barber:barbers(id, name, phone_number)
+        `)
+        .eq('phone_number', clientPhone)
+        .single();
+        
+      if (!error) {
+        clientInfo = data;
+      }
+    }
+    
+    // Check if there's an active booking process (for handling immediate rescheduling)
+    let bookingInProgress = false;
+    let recentlyConfirmed = false;
+    
+    if (lastBookingState && lastBookingState.status) {
+      const lastUpdateTime = lastBookingState.lastUpdated 
+        ? new Date(lastBookingState.lastUpdated) 
+        : new Date(0);
+      
+      // Check if booking was confirmed/completed in the last 10 minutes
+      const tenMinutesAgo = new Date();
+      tenMinutesAgo.setMinutes(tenMinutesAgo.getMinutes() - 10);
+      
+      if (lastBookingState.status === 'confirmed' && lastUpdateTime > tenMinutesAgo) {
+        recentlyConfirmed = true;
+      } else if (lastBookingState.status === 'in_progress' && lastUpdateTime > tenMinutesAgo) {
+        bookingInProgress = true;
+      }
+    }
+    
     return res.status(200).json({
       success: true,
-      status: 'message_batched',
-      batchSize: messageBatch.length
+      isNewClient,
+      conversationHistory: trimmedHistory,
+      clientInfo: clientInfo || null,
+      bookingContext: {
+        bookingInProgress,
+        recentlyConfirmed,
+        lastBookingState
+      }
     });
   } catch (error) {
-    console.error('Error in message batching:', error);
+    console.error('Error handling consolidated messages:', error);
     return res.status(500).json({
       success: false,
       error: error.message
@@ -1800,185 +1748,167 @@ router.post('/batch-messages', async (req, res) => {
   }
 });
 
-// Endpoint to process batched messages
-router.post('/process-message-batch', async (req, res) => {
-  const { clientPhone } = req.body;
+router.get('/get-client-recent-messages', async (req, res) => {
+  const { phone, timeWindow = 2 } = req.query; // timeWindow in minutes
   
-  if (!clientPhone) {
+  if (!phone) {
     return res.status(400).json({
       success: false,
-      error: 'Client phone is required'
+      error: 'Client phone number is required'
     });
   }
   
   try {
-    // Get the client's message batch
-    const { data: client, error } = await supabase
+    // Format phone if needed
+    let formattedPhone = phone;
+    if (!formattedPhone.startsWith('+')) {
+      const digits = formattedPhone.replace(/\D/g, '');
+      if (digits.length === 10) {
+        formattedPhone = `+1${digits}`;
+      } else if (digits.length === 11 && digits.startsWith('1')) {
+        formattedPhone = `+${digits}`;
+      }
+    }
+    
+    // Get client conversation history
+    const { data: clientData } = await supabase
       .from('clients')
-      .select('message_batch, conversation_history')
-      .eq('phone_number', clientPhone)
+      .select('conversation_history')
+      .eq('phone_number', formattedPhone)
       .single();
     
-    if (error) {
-      console.error('Error getting client batch:', error);
+    if (!clientData || !clientData.conversation_history) {
+      return res.status(200).json({
+        success: true,
+        messages: []
+      });
+    }
+    
+    // Filter messages by time window
+    const conversationHistory = clientData.conversation_history;
+    const timeWindowMs = parseInt(timeWindow) * 60 * 1000; // Convert minutes to milliseconds
+    const cutoffTime = new Date(Date.now() - timeWindowMs);
+    
+    const recentMessages = conversationHistory.filter(msg => {
+      // Only include client messages, not system messages
+      if (msg.sender !== 'client') return false;
+      
+      // Check if message is within time window
+      const msgTime = new Date(msg.timestamp);
+      return msgTime > cutoffTime;
+    });
+    
+    // Return messages sorted by timestamp (oldest first)
+    const sortedMessages = recentMessages.sort((a, b) => {
+      return new Date(a.timestamp) - new Date(b.timestamp);
+    });
+    
+    return res.status(200).json({
+      success: true,
+      messages: sortedMessages,
+      clientPhone: formattedPhone,
+      messagesFound: sortedMessages.length
+    });
+  } catch (error) {
+    console.error('Error getting recent client messages:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Endpoint to get a client's recent booking
+router.get('/get-recent-booking', async (req, res) => {
+  const { phone } = req.query;
+  
+  if (!phone) {
+    return res.status(400).json({
+      success: false,
+      error: 'Client phone number is required'
+    });
+  }
+  
+  try {
+    // Format phone if needed
+    let formattedPhone = phone;
+    if (!formattedPhone.startsWith('+')) {
+      const digits = formattedPhone.replace(/\D/g, '');
+      if (digits.length === 10) {
+        formattedPhone = `+1${digits}`;
+      } else if (digits.length === 11 && digits.startsWith('1')) {
+        formattedPhone = `+${digits}`;
+      }
+    }
+    
+    // Get client booking state
+    const { data: clientData } = await supabase
+      .from('clients')
+      .select(`
+        phone_number,
+        last_booking_state,
+        preferred_barber:barbers(id, name, phone_number)
+      `)
+      .eq('phone_number', formattedPhone)
+      .single();
+    
+    if (!clientData) {
       return res.status(404).json({
         success: false,
         error: 'Client not found'
       });
     }
     
-    const messageBatch = client?.message_batch || [];
+    // Check if client has a recent booking
+    const bookingState = clientData.last_booking_state || {
+      status: 'not_started',
+      appointmentDetails: null,
+      lastUpdated: null
+    };
     
-    if (messageBatch.length === 0) {
+    // If there's no booking or it was updated too long ago
+    if (bookingState.status === 'not_started' || !bookingState.lastUpdated) {
       return res.status(200).json({
         success: true,
-        status: 'no_messages',
-        conversationHistory: client?.conversation_history || []
+        hasRecentBooking: false,
+        bookingState,
+        clientPhone: formattedPhone
       });
     }
     
-    // Combine all messages in the batch
-    const combinedMessage = messageBatch
-      .map(msg => msg.message)
-      .join(" ");
+    // Check if the booking is recent (within last 30 minutes)
+    const lastUpdateTime = new Date(bookingState.lastUpdated);
+    const thirtyMinutesAgo = new Date();
+    thirtyMinutesAgo.setMinutes(thirtyMinutesAgo.getMinutes() - 30);
     
-    // Store the combined message in conversation history
-    const conversationHistory = await storeConversationMessage(
-      clientPhone, 
-      'client', 
-      combinedMessage
-    );
+    const isRecent = lastUpdateTime > thirtyMinutesAgo;
     
-    // Clear the message batch
-    await supabase
-      .from('clients')
-      .update({ 
-        message_batch: [],
-        updated_at: new Date()
-      })
-      .eq('phone_number', clientPhone);
+    // If there's an appointment ID, get full details from appointments table
+    let appointmentDetails = bookingState.appointmentDetails || null;
+    let fullAppointmentData = null;
     
-    // Return the combined message and conversation history
-    return res.status(200).json({
-      success: true,
-      combinedMessage,
-      messageCount: messageBatch.length,
-      conversationHistory,
-      clientInfo: client || null
-    });
-  } catch (error) {
-    console.error('Error processing message batch:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Check if a message has been processed
-router.post('/check-processed-message', async (req, res) => {
-  const { clientPhone, messageId } = req.body;
-  
-  if (!clientPhone || !messageId) {
-    return res.status(400).json({
-      success: false,
-      error: 'Client phone and message ID are required'
-    });
-  }
-  
-  try {
-    // Get client's processed messages
-    const { data, error } = await supabase
-      .from('clients')
-      .select('processed_messages')
-      .eq('phone_number', clientPhone)
-      .single();
-      
-    if (error && error.code !== 'PGRST116') {
-      console.error('Error checking processed message:', error);
-      return res.status(500).json({
-        success: false,
-        error: 'Database error'
-      });
-    }
-    
-    // Check if message ID is in processed array
-    const processedMessages = data?.processed_messages || [];
-    const processed = processedMessages.includes(messageId);
-    
-    return res.status(200).json({
-      success: true,
-      processed
-    });
-  } catch (error) {
-    console.error('Error checking processed message:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Mark a message as processed
-router.post('/mark-message-processed', async (req, res) => {
-  const { clientPhone, messageId } = req.body;
-  
-  if (!clientPhone || !messageId) {
-    return res.status(400).json({
-      success: false,
-      error: 'Client phone and message ID are required'
-    });
-  }
-  
-  try {
-    // Get client's current processed messages
-    const { data, error } = await supabase
-      .from('clients')
-      .select('processed_messages')
-      .eq('phone_number', clientPhone)
-      .single();
-      
-    // Initialize array or use existing
-    let processedMessages = [];
-    if (!error && data) {
-      processedMessages = data.processed_messages || [];
-    }
-    
-    // Add the message ID if it's not already there
-    if (!processedMessages.includes(messageId)) {
-      processedMessages.push(messageId);
-    }
-    
-    // Keep only the last 50 processed messages
-    if (processedMessages.length > 50) {
-      processedMessages = processedMessages.slice(-50);
-    }
-    
-    // Update the client record
-    const { data: updateData, error: updateError } = await supabase
-      .from('clients')
-      .upsert({
-        phone_number: clientPhone,
-        processed_messages: processedMessages,
-        updated_at: new Date()
-      }, { onConflict: 'phone_number' })
-      .select();
-      
-    if (updateError) {
-      console.error('Error marking message as processed:', updateError);
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to update database'
-      });
+    if (appointmentDetails && appointmentDetails.eventId) {
+      const { data: appointmentData } = await supabase
+        .from('appointments')
+        .select('*')
+        .eq('google_calendar_event_id', appointmentDetails.eventId)
+        .single();
+        
+      if (appointmentData) {
+        fullAppointmentData = appointmentData;
+      }
     }
     
     return res.status(200).json({
       success: true,
-      messageId,
-      processedCount: processedMessages.length
+      hasRecentBooking: isRecent && bookingState.status === 'confirmed',
+      bookingState,
+      fullAppointmentData,
+      clientPhone: formattedPhone,
+      preferredBarber: clientData.preferred_barber
     });
   } catch (error) {
-    console.error('Error marking message as processed:', error);
+    console.error('Error getting recent booking:', error);
     return res.status(500).json({
       success: false,
       error: error.message

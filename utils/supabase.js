@@ -305,9 +305,80 @@ const appointmentOps = {
   }
 };
 
+const bookingStateOps = {
+  async updateBookingState(clientPhone, stateData) {
+    const { status, appointmentDetails = null } = stateData;
+    
+    if (!clientPhone || !status) {
+      console.error('Missing required parameters for updating booking state');
+      return null;
+    }
+    
+    // Check if client exists
+    const existingClient = await clientOps.getByPhoneNumber(clientPhone);
+    
+    if (!existingClient) {
+      console.error(`Client with phone ${clientPhone} not found`);
+      return null;
+    }
+    
+    // Get current booking state
+    const currentState = existingClient.last_booking_state || {
+      status: 'not_started',
+      appointmentDetails: null,
+      lastUpdated: null
+    };
+    
+    // Prepare updated state
+    const updatedState = {
+      status,
+      appointmentDetails: appointmentDetails || currentState.appointmentDetails,
+      lastUpdated: new Date().toISOString()
+    };
+    
+    // Update client record
+    const { data, error } = await supabase
+      .from('clients')
+      .update({ 
+        last_booking_state: updatedState,
+        updated_at: new Date()
+      })
+      .eq('phone_number', clientPhone)
+      .select();
+      
+    if (error) {
+      console.error('Error updating booking state:', error);
+      return null;
+    }
+    
+    return data[0];
+  },
+  
+  async getBookingState(clientPhone) {
+    if (!clientPhone) {
+      console.error('Client phone number is required');
+      return null;
+    }
+    
+    const existingClient = await clientOps.getByPhoneNumber(clientPhone);
+    
+    if (!existingClient) {
+      return null;
+    }
+    
+    return existingClient.last_booking_state || {
+      status: 'not_started',
+      appointmentDetails: null,
+      lastUpdated: null
+    };
+  }
+};
+
+// Export the new operations
 module.exports = {
   supabase,
   barberOps,
   clientOps,
-  appointmentOps
+  appointmentOps,
+  bookingStateOps
 };

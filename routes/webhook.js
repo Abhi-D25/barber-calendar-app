@@ -1388,12 +1388,30 @@ router.post('/store-conversation', async (req, res) => {
       }
     }
     
-    // Return the full conversation history and client info for AI processing
+    // ---- New Code: Retrieve next appointment date ----
+    // Query the appointments table for the next upcoming appointment
+    // using clientPhone as the linking key (client_phone in appointments table)
+    let nextAppointment = null;
+    const { data: appointmentData, error: appointmentError } = await supabase
+      .from('appointments')
+      .select('start_time')
+      .eq('client_phone', clientPhone)
+      .gt('start_time', new Date().toISOString())
+      .order('start_time', { ascending: true })
+      .limit(1);
+    
+    if (!appointmentError && appointmentData && appointmentData.length > 0) {
+      nextAppointment = appointmentData[0].start_time;
+    }
+    // ----------------------------------------------------
+    
+    // Return the full conversation history, client info, and next appointment for AI processing
     return res.status(200).json({
       success: true,
       isNewClient,
       conversationHistory: conversationHistory,
-      clientInfo: clientInfo || null
+      clientInfo: clientInfo || null,
+      nextAppointment // will be null if no upcoming appointment exists
     });
   } catch (error) {
     console.error('Error storing conversation:', error);
@@ -1403,6 +1421,7 @@ router.post('/store-conversation', async (req, res) => {
     });
   }
 });
+
 
 // Helper function to store conversation messages
 async function storeConversationMessage(clientPhone, sender, message) {

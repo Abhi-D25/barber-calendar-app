@@ -1342,6 +1342,7 @@ async function handleRescheduleEvent(calendar, calendarId, eventId, data, res) {
   }
 }
 
+// Endpoint for Zapier to store conversation messages
 router.post('/store-conversation', async (req, res) => {
   const { 
     clientPhone, 
@@ -1387,34 +1388,12 @@ router.post('/store-conversation', async (req, res) => {
       }
     }
     
-    // Fetch the client's next appointment
-    let nextAppointmentStartTime = null;
-    
-    // Only search for appointments if client exists
-    if (client) {
-      const { data: appointmentData, error: appointmentError } = await supabase
-        .from('appointments')
-        .select('start_time, service_type')
-        .eq('client_phone', clientPhone)
-        .gte('start_time', new Date().toISOString())
-        .order('start_time', { ascending: true })
-        .limit(1);
-      
-      if (!appointmentError && appointmentData && appointmentData.length > 0) {
-        nextAppointmentStartTime = {
-          startTime: appointmentData[0].start_time,
-          serviceType: appointmentData[0].service_type || 'Appointment'
-        };
-      }
-    }
-    
     // Return the full conversation history and client info for AI processing
     return res.status(200).json({
       success: true,
       isNewClient,
       conversationHistory: conversationHistory,
-      clientInfo: clientInfo || null,
-      nextAppointment: nextAppointmentStartTime
+      clientInfo: clientInfo || null
     });
   } catch (error) {
     console.error('Error storing conversation:', error);

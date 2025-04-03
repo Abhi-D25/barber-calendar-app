@@ -338,6 +338,91 @@ router.post('/client-appointment', async (req, res) => {
   }
 });
 
+// Helper function for cancelling client appointments
+async function handleCancelClientAppointment(calendar, calendarId, eventId, clientName, clientPhone, res) {
+  try {
+    // If no eventId is provided, try to find by client info
+    let eventToCancel = null;
+    
+    if (!eventId) {
+      if (!clientName && !clientPhone) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Either event ID or client information is required for cancelling events' 
+        });
+      }
+      
+      // Try to find the event by client name or phone (might be in description)
+      const searchTerm = clientName || clientPhone;
+      eventToCancel = await findEventByClientName(
+        calendar, 
+        calendarId, 
+        searchTerm
+      );
+      
+      if (!eventToCancel) {
+        return res.status(404).json({
+          success: false,
+          error: `No matching event found for client "${searchTerm}"`
+        });
+      }
+      
+      eventId = eventToCancel.id;
+      console.log(`Found event to cancel: ${eventId} (${eventToCancel.summary})`);
+    } else {
+      // Verify the event exists
+      try {
+        eventToCancel = await calendar.events.get({
+          calendarId: calendarId,
+          eventId: eventId
+        });
+      } catch (getErr) {
+        // First check if getErr and getErr.response exist before accessing properties
+        if (getErr && getErr.response && getErr.response.status === 404) {
+          return res.status(404).json({
+            success: false,
+            error: 'Event not found with the provided ID'
+          });
+        }
+        throw getErr;
+      }
+    }
+    
+    // Event exists, delete it from Google Calendar
+    await calendar.events.delete({
+      calendarId: calendarId,
+      eventId: eventId,
+      sendUpdates: 'all' // Send update notifications
+    });
+    
+    // Delete the appointment from the database instead of updating status
+    try {
+      const { data, error } = await supabase
+        .from('appointments')
+        .delete()
+        .eq('google_calendar_event_id', eventId);
+        
+      if (error) {
+        console.error('Error deleting appointment from database:', error);
+      } else {
+        console.log('Successfully deleted appointment from database');
+      }
+    } catch (dbError) {
+      console.error('Database error when deleting appointment:', dbError);
+    }
+    
+    return res.status(200).json({
+      success: true,
+      action: 'cancel',
+      eventId: eventId,
+      message: 'Appointment successfully cancelled and removed from database'
+    });
+  } catch (error) {
+    console.error('Error cancelling event:', error);
+    throw error;
+  }
+}
+
 async function handleCreateClientAppointment(calendar, calendarId, data, res) {
   const { clientPhone, clientName, serviceType, startDateTime, duration, notes, barberId } = data;
   
@@ -409,90 +494,6 @@ async function handleCreateClientAppointment(calendar, calendarId, data, res) {
   });
 }
 
-// Helper function for cancelling client appointments
-// Helper function for cancelling client appointments
-async function handleCancelClientAppointment(calendar, calendarId, eventId, clientName, clientPhone, startDateTime, res) {
-  try {
-    // If no eventId is provided, try to find by client info
-    let eventToCancel = null;
-    
-    if (!eventId) {
-      if (!clientName && !clientPhone) {
-        return res.status(400).json({ 
-          success: false, 
-          error: 'Either event ID or client information is required for cancelling events' 
-        });
-      }
-      
-      // Try to find the event by client name or phone (might be in description)
-      const searchTerm = clientName || clientPhone;
-      eventToCancel = await findEventByClientName(
-        calendar, 
-        calendarId, 
-        searchTerm
-      );
-      
-      if (!eventToCancel) {
-        return res.status(404).json({
-          success: false,
-          error: `No matching event found for client "${searchTerm}"`
-        });
-      }
-      
-      eventId = eventToCancel.id;
-      console.log(`Found event to cancel: ${eventId} (${eventToCancel.summary})`);
-    } else {
-      // Verify the event exists
-      try {
-        eventToCancel = await calendar.events.get({
-          calendarId: calendarId,
-          eventId: eventId
-        });
-      } catch (getErr) {
-        if (getErr.response?.status === 404) {
-          return res.status(404).json({
-            success: false,
-            error: 'Event not found with the provided ID'
-          });
-        }
-        throw getErr;
-      }
-    }
-    
-    // Event exists, delete it from Google Calendar
-    await calendar.events.delete({
-      calendarId: calendarId,
-      eventId: eventId,
-      sendUpdates: 'all' // Send update notifications
-    });
-    
-    // Delete the appointment from the database instead of updating status
-    try {
-      const { data, error } = await supabase
-        .from('appointments')
-        .delete()
-        .eq('google_calendar_event_id', eventId);
-        
-      if (error) {
-        console.error('Error deleting appointment from database:', error);
-      } else {
-        console.log('Successfully deleted appointment from database');
-      }
-    } catch (dbError) {
-      console.error('Database error when deleting appointment:', dbError);
-    }
-    
-    return res.status(200).json({
-      success: true,
-      action: 'cancel',
-      eventId: eventId,
-      message: 'Appointment successfully cancelled and removed from database'
-    });
-  } catch (error) {
-    console.error('Error cancelling event:', error);
-    throw error;
-  }
-}
 
 // Helper function for rescheduling client appointments
 async function handleRescheduleClientAppointment(calendar, calendarId, eventId, clientName, clientPhone, oldStartDateTime, newStartDateTime, duration, res) {

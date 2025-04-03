@@ -737,17 +737,32 @@ router.post('/update-client-preference', async (req, res) => {
 });
 
 // Add endpoint for checking barber availability
+// Modify the check-availability endpoint to include finding next available slots
 router.post('/check-availability', async (req, res) => {
   const {
     barberPhoneNumber,
     barberId,
     startDateTime,
     endDateTime,
-    returnFormat = "zapier"
+    returnFormat = "zapier",
+    findNextAvailable = false,
+    numSlots = 3,
+    slotDurationMinutes = 30,
+    daysToCheck = 7,
+    startTime = "09:00",
+    endTime = "18:00"
   } = req.body;
 
   // Log the incoming request
-  console.log('Check availability webhook received:', { barberPhoneNumber, barberId, startDateTime, endDateTime });
+  console.log('Check availability webhook received:', { 
+    barberPhoneNumber, 
+    barberId, 
+    startDateTime, 
+    endDateTime,
+    findNextAvailable,
+    numSlots,
+    slotDurationMinutes
+  });
 
   if (!barberPhoneNumber && !barberId) {
     return res.status(400).json({
@@ -785,6 +800,22 @@ router.post('/check-availability', async (req, res) => {
     
     // Get calendar ID
     const calendarId = barber.selected_calendar_id || 'primary';
+
+    // If we're looking for the next available slot
+    if (findNextAvailable) {
+      return await findNextAvailableSlots(
+        calendar, 
+        calendarId, 
+        numSlots, 
+        slotDurationMinutes, 
+        daysToCheck, 
+        startTime,
+        endTime,
+        startDateTime, // If provided, start looking from this date
+        returnFormat,
+        res
+      );
+    }
 
     // DIRECT APPROACH: Manually create Pacific time dates with correct offset
     // Extract date and time components
@@ -944,6 +975,286 @@ router.post('/check-availability', async (req, res) => {
     });
   }
 });
+
+// Helper function to find next available time slots
+async function findNextAvailableSlots(
+  calendar, 
+  calendarId, 
+  numSlots = 3, 
+  slotDurationMinutes = 30, 
+  daysToCheck = 7,
+  startTime = "09:00",
+  endTime = "18:00",
+  startFromDateTime = null,
+  returnFormat = "standard",
+  res
+) {
+  try {
+    // Determine the start date for our search
+    let searchStartDate;
+    if (startFromDateTime) {
+      // If a specific start date/time is provided, use it
+      searchStartDate = new Date(startFromDateTime);
+    } else {
+      // Otherwise, start from the current time
+      searchStartDate = new Date();
+    }
+    
+    // Make sure we're using a valid date
+    if (isNaN(searchStartDate.getTime())) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid start date provided'
+      });
+    }
+    
+    // Calculate the end date for our search (start date + daysToCheck)
+    const searchEndDate = new Date(searchStartDate);
+    searchEndDate.setDate(searchEndDate.getDate() + daysToCheck);
+    
+    console.log(`Searching for available slots between ${searchStartDate.toISOString()} and ${searchEndDate.toISOString()}`);
+    
+    // Get all events in the search period
+    const eventsResponse = await calendar.events.list({
+      calendarId: calendarId,
+      timeMin: searchStartDate.toISOString(),
+      timeMax: searchEndDate.toISOString(),
+      timeZone: 'America/Los_Angeles',
+      singleEvents: true,
+      orderBy: 'startTime',
+      maxResults: 1000 // Get a high number to ensure we get all events
+    });
+    
+    const events = eventsResponse.data.items;
+    console.log(`Found ${events.length} existing events in the search period`);
+    
+    // Parse business hours
+    const [startHour, startMinute] = startTime.split(':').map(Number);
+    const [endHour, endMinute] = endTime.split(':').map(Number);
+    
+    // Find available slots
+    const availableSlots = [];
+    const currentDate = new Date(searchStartDate);
+    
+    // Set time to the start of business hours if it's earlier than that
+    const currentHour = currentDate.getHours();
+    const currentMinute = currentDate.getMinutes();
+    
+    // If we're starting the search today and it's already past the end of business hours,
+    // move to the start of business hours tomorrow
+    if (
+      currentHour > endHour || 
+      (currentHour === endHour && currentMinute >= endMinute)
+    ) {
+      currentDate.setDate(currentDate.getDate() + 1);
+      currentDate.setHours(startHour, startMinute, 0, 0);
+    } 
+    // If we're before business hours today, set to start of business hours today
+    else if (
+      currentHour < startHour || 
+      (currentHour === startHour && currentMinute < startMinute)
+    ) {
+      currentDate.setHours(startHour, startMinute, 0, 0);
+    }
+    // Round up to the nearest slot increment
+    else {
+      const totalCurrentMinutes = currentHour * 60 + currentMinute;
+      const nextSlotMinutes = Math.ceil(totalCurrentMinutes / slotDurationMinutes) * slotDurationMinutes;
+      const nextHour = Math.floor(nextSlotMinutes / 60);
+      const nextMinute = nextSlotMinutes % 60;
+      
+      currentDate.setHours(nextHour, nextMinute, 0, 0);
+      
+      // If this pushes us past business hours, move to next day
+      if (nextHour > endHour || (nextHour === endHour && nextMinute > 0)) {
+        currentDate.setDate(currentDate.getDate() + 1);
+        currentDate.setHours(startHour, startMinute, 0, 0);
+      }
+    }
+    
+    // Convert all events to slot boundaries for quick checking
+    const busyTimes = [];
+    for (const event of events) {
+      if (event.start && event.end) {
+        busyTimes.push({
+          start: new Date(event.start.dateTime || event.start.date),
+          end: new Date(event.end.dateTime || event.end.date)
+        });
+      }
+    }
+    
+    // Loop through days until we find enough slots or reach the end date
+    day_loop: while (currentDate < searchEndDate && availableSlots.length < numSlots) {
+      // Skip weekends if needed (0 = Sunday, 6 = Saturday)
+      // Uncomment and modify if you want to skip certain days
+      // const dayOfWeek = currentDate.getDay();
+      // if (dayOfWeek === 0 || dayOfWeek === 6) {
+      //   currentDate.setDate(currentDate.getDate() + 1);
+      //   currentDate.setHours(startHour, startMinute, 0, 0);
+      //   continue;
+      // }
+      
+      // Set to business hour start
+      currentDate.setHours(startHour, startMinute, 0, 0);
+      
+      // Loop through each potential slot in the current day
+      while (
+        (currentDate.getHours() < endHour || 
+        (currentDate.getHours() === endHour && currentDate.getMinutes() <= endMinute - slotDurationMinutes)) && 
+        availableSlots.length < numSlots
+      ) {
+        // Calculate the end of this potential slot
+        const slotEnd = new Date(currentDate);
+        slotEnd.setMinutes(slotEnd.getMinutes() + slotDurationMinutes);
+        
+        // Check if this slot overlaps with any busy times
+        let isAvailable = true;
+        for (const busy of busyTimes) {
+          if (
+            (currentDate >= busy.start && currentDate < busy.end) || // Slot start is during a busy period
+            (slotEnd > busy.start && slotEnd <= busy.end) || // Slot end is during a busy period
+            (currentDate <= busy.start && slotEnd >= busy.end) // Slot completely contains a busy period
+          ) {
+            isAvailable = false;
+            break;
+          }
+        }
+        
+        // If the slot is available, add it to our list
+        if (isAvailable) {
+          availableSlots.push({
+            start: new Date(currentDate),
+            end: new Date(slotEnd)
+          });
+        }
+        
+        // Move to the next potential slot
+        currentDate.setMinutes(currentDate.getMinutes() + slotDurationMinutes);
+      }
+      
+      // Move to the next day
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+    
+    console.log(`Found ${availableSlots.length} available slots`);
+    
+    // Format the slots according to the requested format
+    if (returnFormat === "zapier") {
+      const formattedSlots = availableSlots.map(slot => {
+        // Format the dates in Pacific Time
+        const pacificStartTime = slot.start.toLocaleString('en-US', {
+          timeZone: 'America/Los_Angeles',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false
+        });
+        
+        const pacificEndTime = slot.end.toLocaleString('en-US', {
+          timeZone: 'America/Los_Angeles',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false
+        });
+        
+        // Convert to a structured format: YYYY-MM-DDTHH:MM:SS-07:00
+        const formatPacificTime = (timeStr) => {
+          // Parse the formatted date string
+          // Expected format: MM/DD/YYYY, HH:MM:SS
+          const parts = timeStr.split(', ');
+          const dateParts = parts[0].split('/');
+          const timeParts = parts[1];
+          
+          // Rearrange to ISO format
+          const month = dateParts[0].padStart(2, '0');
+          const day = dateParts[1].padStart(2, '0');
+          const year = dateParts[2];
+          
+          // Determine if PDT or PST is in effect for this date
+          const date = new Date(timeStr);
+          const tzName = date.toLocaleString('en-US', { 
+            timeZone: 'America/Los_Angeles', 
+            timeZoneName: 'short' 
+          }).split(' ').pop();
+          
+          const offset = tzName === 'PDT' ? '-07:00' : '-08:00';
+          
+          return `${year}-${month}-${day}T${timeParts}${offset}`;
+        };
+        
+        return {
+          "Slot Start": formatPacificTime(pacificStartTime),
+          "Slot End": formatPacificTime(pacificEndTime),
+          "Duration": `${slotDurationMinutes} minutes`,
+          "Day of Week": slot.start.toLocaleString('en-US', { 
+            timeZone: 'America/Los_Angeles', 
+            weekday: 'long' 
+          }),
+          "Date": slot.start.toLocaleString('en-US', { 
+            timeZone: 'America/Los_Angeles',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+          }),
+          "Time": slot.start.toLocaleString('en-US', { 
+            timeZone: 'America/Los_Angeles',
+            hour: 'numeric',
+            minute: 'numeric',
+            hour12: true
+          })
+        };
+      });
+      
+      return res.status(200).json({
+        availableSlots: formattedSlots
+      });
+    } else {
+      // Standard format
+      const formattedSlots = availableSlots.map(slot => ({
+        start: slot.start.toISOString(),
+        end: slot.end.toISOString(),
+        duration: `${slotDurationMinutes} minutes`,
+        dayOfWeek: slot.start.toLocaleString('en-US', { 
+          timeZone: 'America/Los_Angeles', 
+          weekday: 'long' 
+        }),
+        formattedDate: slot.start.toLocaleString('en-US', { 
+          timeZone: 'America/Los_Angeles',
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        formattedTime: slot.start.toLocaleString('en-US', { 
+          timeZone: 'America/Los_Angeles',
+          hour: 'numeric',
+          minute: 'numeric',
+          hour12: true
+        })
+      }));
+      
+      return res.status(200).json({
+        success: true,
+        action: 'find-next-available',
+        availableSlots: formattedSlots,
+        slotsFound: formattedSlots.length,
+        searchPeriod: {
+          start: searchStartDate.toISOString(),
+          end: searchEndDate.toISOString()
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Find next available slots error:', error);
+    throw error;
+  }
+}
 
 router.post('/register-client', async (req, res) => {
   const {

@@ -449,7 +449,7 @@ async function handleCancelClientAppointment(calendar, calendarId, eventId, clie
           eventId: eventId
         });
       } catch (getErr) {
-        if (getErr.response && getErr.response.status === 404) {
+        if (getErr.response?.status === 404) {
           return res.status(404).json({
             success: false,
             error: 'Event not found with the provided ID'

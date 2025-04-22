@@ -1896,32 +1896,27 @@ router.get('/get-preferred-barber', async (req, res) => {
       }
     }
     
-    // Query to get the preferred barber's details using Supabase
-    const { data, error } = await supabase
-      .from('clients')
-      .select(`
-        preferred_barber:barbers (
-          id,
-          name,
-          phone_number
-        )
-      `)
-      .eq('phone_number', formattedPhone)
-      .single();
+    // Get client info with preferred barber details
+    const client = await clientOps.getByPhoneNumber(formattedPhone);
     
-    if (error) {
-      console.error('Error fetching preferred barber:', error);
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to fetch preferred barber'
-      });
-    }
-    
-    if (!data || !data.preferred_barber) {
+    if (!client) {
       return res.status(200).json({
         success: true,
         found: false,
-        message: 'No preferred barber found for this client'
+        message: 'Client not found'
+      });
+    }
+    
+    if (!client.preferred_barber) {
+      return res.status(200).json({
+        success: true,
+        found: false,
+        message: 'No preferred barber found for this client',
+        client: {
+          id: client.id,
+          name: client.name,
+          phone: client.phone_number,
+        }
       });
     }
     
@@ -1929,9 +1924,14 @@ router.get('/get-preferred-barber', async (req, res) => {
       success: true,
       found: true,
       barber: {
-        id: data.preferred_barber.id,
-        name: data.preferred_barber.name,
-        phone: data.preferred_barber.phone_number
+        id: client.preferred_barber.id,
+        name: client.preferred_barber.name,
+        phone: client.preferred_barber.phone_number
+      },
+      client: {
+        id: client.id,
+        name: client.name,
+        phone: client.phone_number,
       }
     });
     

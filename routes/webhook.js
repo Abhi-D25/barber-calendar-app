@@ -48,26 +48,194 @@ async function handleCreateClientAppointment(calendar, calendarId, data, res) {
   return res.status(200).json({ success: true, action: 'create', eventId: event.data.id, eventLink: event.data.htmlLink, message: 'Appointment added to calendar' });
 }
 
+async function handleCancelAppointment(calendar, calendarId, eventId, clientPhone, res) {
+  if (!eventId) {
+    return res.status(400).json({ success: false, error: 'Event ID is required for cancellation' });
+  }
+
+  try {
+    // Delete from Google Calendar
+    await calendar.events.delete({
+      calendarId,
+      eventId,
+      sendUpdates: 'all' // Notify attendees
+    });
+
+    // Delete from database
+    const { data, error } = await supabase
+      .from('appointments')
+      .delete()
+      .eq('google_calendar_event_id', eventId);
+
+    if (error) {
+      console.error('Error deleting appointment from database:', error);
+    }
+
+    return res.status(200).json({
+      success: true,
+      action: 'cancel',
+      eventId,
+      message: 'Appointment successfully cancelled'
+    });
+  } catch (e) {
+    console.error('Error cancelling appointment:', e);
+    return res.status(500).json({
+      success: false,
+      error: `Failed to cancel appointment: ${e.message}`
+    });
+  }
+}
+
+async function handleRescheduleAppointment(calendar, calendarId, data, res) {
+  const { eventId, newStartDateTime, clientPhone, clientName, serviceType, duration, notes, barberId } = data;
+  
+  if (!eventId || !newStartDateTime) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Event ID and new start date-time are required for rescheduling' 
+    });
+  }
+
+  try {
+    // Get existing event first to preserve any other data
+    const existingEvent = await calendar.events.get({
+      calendarId,
+      eventId
+    });
+
+    if (!existingEvent.data) {
+      return res.status(404).json({
+        success: false,
+        error: 'Appointment not found in calendar'
+      });
+    }
+
+    // Parse new start time and calculate new end time
+    const newStartTime = parsePacificDateTime(newStartDateTime);
+    const newEndTime = new Date(newStartTime.getTime() + (duration * 60000));
+
+    // Update the event in Google Calendar
+    const updatedEvent = await calendar.events.update({
+      calendarId,
+      eventId,
+      resource: {
+        ...existingEvent.data,
+        start: { dateTime: newStartTime.toISOString(), timeZone: 'America/Los_Angeles' },
+        end: { dateTime: newEndTime.toISOString(), timeZone: 'America/Los_Angeles' }
+      },
+      sendUpdates: 'all' // Notify attendees
+    });
+
+    // Update the appointment in the database
+    const updateResult = await appointmentOps.updateByEventId(eventId, {
+      start_time: newStartTime.toISOString(),
+      end_time: newEndTime.toISOString()
+    });
+
+    return res.status(200).json({
+      success: true,
+      action: 'reschedule',
+      eventId: updatedEvent.data.id,
+      eventLink: updatedEvent.data.htmlLink,
+      message: 'Appointment successfully rescheduled'
+    });
+  } catch (e) {
+    console.error('Error rescheduling appointment:', e);
+    return res.status(500).json({
+      success: false,
+      error: `Failed to reschedule appointment: ${e.message}`
+    });
+  }
+}
+
 router.post('/client-appointment', async (req, res) => {
-  let { clientPhone, clientName = "New Client", serviceType = 'Appointment', startDateTime, newStartDateTime, duration = 30, notes = '', preferredBarberId, isCancelling = false, isRescheduling = false, eventId } = req.body;
+  let { 
+    clientPhone, 
+    clientName = "New Client", 
+    serviceType = 'Appointment', 
+    startDateTime, 
+    newStartDateTime, 
+    duration = 30, 
+    notes = '', 
+    preferredBarberId, 
+    isCancelling = false, 
+    isRescheduling = false, 
+    eventId 
+  } = req.body;
+  
+  // Parse boolean strings to actual booleans
   if (typeof isCancelling === 'string') isCancelling = isCancelling.toLowerCase() === 'true';
   if (typeof isRescheduling === 'string') isRescheduling = isRescheduling.toLowerCase() === 'true';
   if (typeof duration === 'string') duration = parseInt(duration, 10) || 30;
-  if (!clientPhone) return res.status(400).json({ success: false, error: 'Client phone number is required' });
+  
+  // Validate required fields
+  if (!clientPhone) {
+    return res.status(400).json({ success: false, error: 'Client phone number is required' });
+  }
+  
   try {
+    // Get or create client
     let client = await clientOps.getByPhoneNumber(clientPhone);
+    
     if (!client && !isCancelling && preferredBarberId) {
-      client = await clientOps.createOrUpdate({ phone_number: clientPhone, name: clientName, preferred_barber_id: preferredBarberId });
+      client = await clientOps.createOrUpdate({ 
+        phone_number: clientPhone, 
+        name: clientName, 
+        preferred_barber_id: preferredBarberId 
+      });
     }
-    if (!preferredBarberId && (!client || !client.preferred_barber_id)) return res.status(400).json({ success: false, error: 'No barber specified and client has no preferred barber' });
+    
+    // Validate barber info
+    if (!preferredBarberId && (!client || !client.preferred_barber_id)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'No barber specified and client has no preferred barber' 
+      });
+    }
+    
     const barberId = preferredBarberId || client?.preferred_barber_id;
     const { data: barber } = await supabase.from('barbers').select('*').eq('id', barberId).single();
-    if (!barber?.refresh_token) return res.status(404).json({ success: false, error: 'Barber not found or not authorized' });
+    
+    if (!barber?.refresh_token) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Barber not found or not authorized' 
+      });
+    }
+    
+    // Create Google Calendar client
     const oauth2Client = createOAuth2Client(barber.refresh_token);
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
     const calendarId = barber.selected_calendar_id || 'primary';
-    return await handleCreateClientAppointment(calendar, calendarId, { clientPhone, clientName, serviceType, startDateTime, duration, notes, barberId: barber.id }, res);
+    
+    // Handle different operations based on request type
+    if (isCancelling) {
+      return await handleCancelAppointment(calendar, calendarId, eventId, clientPhone, res);
+    } else if (isRescheduling) {
+      return await handleRescheduleAppointment(calendar, calendarId, {
+        eventId,
+        newStartDateTime,
+        clientPhone,
+        clientName,
+        serviceType,
+        duration,
+        notes,
+        barberId: barber.id
+      }, res);
+    } else {
+      // Create new appointment
+      return await handleCreateClientAppointment(calendar, calendarId, {
+        clientPhone,
+        clientName,
+        serviceType,
+        startDateTime,
+        duration,
+        notes,
+        barberId: barber.id
+      }, res);
+    }
   } catch (e) {
+    console.error('Error in client-appointment endpoint:', e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });

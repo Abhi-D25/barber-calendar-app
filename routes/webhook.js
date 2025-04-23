@@ -108,13 +108,26 @@ router.post('/check-availability', async (req, res) => {
       maxResults: 100
     });
 
-    return res.status(200).json({
+    // Set the correct content type explicitly
+    res.setHeader('Content-Type', 'application/json');
+    
+    // Send a clean, simplified response structure
+    const result = {
       success: true,
       isAvailable: response.data.items.length === 0,
-      events: response.data.items
-    });
+      events: response.data.items.map(event => ({
+        id: event.id,
+        summary: event.summary || "Untitled",
+        start: event.start?.dateTime || event.start?.date,
+        end: event.end?.dateTime || event.end?.date
+      }))
+    };
+    
+    // Use res.send with JSON.stringify to ensure proper formatting
+    return res.send(JSON.stringify(result));
   } catch (e) {
-    return res.status(500).json({ success: false, error: e.message });
+    res.setHeader('Content-Type', 'application/json');
+    return res.send(JSON.stringify({ success: false, error: e.message }));
   }
 });
 

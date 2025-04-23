@@ -154,10 +154,49 @@ router.get('/get-preferred-barber', async (req, res) => {
     let formattedPhone = clientPhone;
     const digits = formattedPhone.replace(/\D/g, '');
     if (!formattedPhone.startsWith('+')) formattedPhone = digits.length === 10 ? `+1${digits}` : `+${digits}`;
+
     const client = await clientOps.getByPhoneNumber(formattedPhone);
     if (!client) return res.status(200).json({ success: true, found: false, message: 'Client not found' });
-    if (!client.preferred_barber) return res.status(200).json({ success: true, found: false, message: 'No preferred barber', client: { id: client.id, name: client.name, phone: client.phone_number } });
-    return res.status(200).json({ success: true, found: true, barber: { id: client.preferred_barber.id, name: client.preferred_barber.name, phone: client.preferred_barber.phone_number }, client: { id: client.id, name: client.name, phone: client.phone_number } });
+
+    let latestAppointment = null;
+    const { data: appointments, error } = await supabase
+      .from('appointments')
+      .select('id, start_time, google_calendar_event_id')
+      .eq('client_phone', formattedPhone)
+      .order('start_time', { ascending: false })
+      .limit(1);
+
+    if (appointments && appointments.length > 0) {
+      latestAppointment = appointments[0];
+    }
+
+    if (!client.preferred_barber) return res.status(200).json({
+      success: true,
+      found: false,
+      message: 'No preferred barber',
+      client: {
+        id: client.id,
+        name: client.name,
+        phone: client.phone_number
+      },
+      latestAppointment
+    });
+
+    return res.status(200).json({
+      success: true,
+      found: true,
+      barber: {
+        id: client.preferred_barber.id,
+        name: client.preferred_barber.name,
+        phone: client.preferred_barber.phone_number
+      },
+      client: {
+        id: client.id,
+        name: client.name,
+        phone: client.phone_number
+      },
+      latestAppointment
+    });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
   }

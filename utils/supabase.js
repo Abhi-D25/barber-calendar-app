@@ -374,11 +374,104 @@ const bookingStateOps = {
   }
 };
 
+const conversationOps = {
+  async getOrCreateSession(phoneNumber) {
+    // Check if session exists
+    let { data: session, error } = await supabase
+      .from('conversation_sessions')
+      .select('*')
+      .eq('phone_number', phoneNumber)
+      .single();
+    
+    if (error && error.code === 'PGRST116') {
+      // Session doesn't exist, create it
+      const { data: newSession, error: createError } = await supabase
+        .from('conversation_sessions')
+        .insert({ phone_number: phoneNumber })
+        .select()
+        .single();
+      
+      if (createError) {
+        console.error('Error creating session:', createError);
+        return null;
+      }
+      session = newSession;
+    }
+    
+    // Update last_active
+    await supabase
+      .from('conversation_sessions')
+      .update({ last_active: new Date() })
+      .eq('id', session.id);
+    
+    return session;
+  },
+
+  async addMessage(sessionId, role, content, metadata = null) {
+    const { data, error } = await supabase
+      .from('conversation_messages')
+      .insert({
+        session_id: sessionId,
+        role,
+        content,
+        metadata
+      })
+      .select();
+    
+    if (error) {
+      console.error('Error adding message:', error);
+      return null;
+    }
+    
+    return data[0];
+  },
+
+  async getConversationHistory(phoneNumber, limit = 10) {
+    // Get session
+    const session = await this.getOrCreateSession(phoneNumber);
+    if (!session) return [];
+    
+    // Get messages
+    const { data, error } = await supabase
+      .from('conversation_messages')
+      .select('*')
+      .eq('session_id', session.id)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    
+    if (error) {
+      console.error('Error fetching conversation history:', error);
+      return [];
+    }
+    
+    // Return messages in chronological order
+    return data.reverse();
+  },
+
+  async clearSession(phoneNumber) {
+    const session = await this.getOrCreateSession(phoneNumber);
+    if (!session) return false;
+    
+    const { error } = await supabase
+      .from('conversation_messages')
+      .delete()
+      .eq('session_id', session.id);
+    
+    if (error) {
+      console.error('Error clearing session:', error);
+      return false;
+    }
+    
+    return true;
+  }
+};
+
 // Export the new operations
 module.exports = {
   supabase,
   barberOps,
   clientOps,
   appointmentOps,
-  bookingStateOps
+  bookingStateOps,
+  conversationOps  // Add this
 };

@@ -272,4 +272,111 @@ router.post('/find-available-slots', async (req, res) => {
   }
 });
 
+router.post('/conversation/store-message', async (req, res) => {
+  const { phoneNumber, role, content, metadata } = req.body;
+  
+  if (!phoneNumber || !role || !content) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Missing required fields: phoneNumber, role, content' 
+    });
+  }
+  
+  try {
+    // Get or create session
+    const session = await conversationOps.getOrCreateSession(phoneNumber);
+    if (!session) {
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to get or create session' 
+      });
+    }
+    
+    // Add message
+    const message = await conversationOps.addMessage(
+      session.id, 
+      role, 
+      content, 
+      metadata
+    );
+    
+    if (!message) {
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to store message' 
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      message,
+      sessionId: session.id
+    });
+  } catch (e) {
+    console.error('Error in store-message:', e);
+    return res.status(500).json({ 
+      success: false, 
+      error: e.message 
+    });
+  }
+});
+
+// Get conversation history
+router.get('/conversation/history', async (req, res) => {
+  const { phoneNumber, limit = 10 } = req.query;
+  
+  if (!phoneNumber) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Phone number is required' 
+    });
+  }
+  
+  try {
+    const history = await conversationOps.getConversationHistory(
+      phoneNumber, 
+      parseInt(limit)
+    );
+    
+    return res.status(200).json({
+      success: true,
+      history,
+      count: history.length
+    });
+  } catch (e) {
+    console.error('Error in get-history:', e);
+    return res.status(500).json({ 
+      success: false, 
+      error: e.message 
+    });
+  }
+});
+
+// Clear conversation history
+router.post('/conversation/clear', async (req, res) => {
+  const { phoneNumber } = req.body;
+  
+  if (!phoneNumber) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Phone number is required' 
+    });
+  }
+  
+  try {
+    const cleared = await conversationOps.clearSession(phoneNumber);
+    
+    return res.status(200).json({
+      success: cleared,
+      message: cleared ? 'Session cleared successfully' : 'Failed to clear session'
+    });
+  } catch (e) {
+    console.error('Error in clear-session:', e);
+    return res.status(500).json({ 
+      success: false, 
+      error: e.message 
+    });
+  }
+});
+
 module.exports = router;

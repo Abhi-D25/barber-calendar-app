@@ -547,4 +547,94 @@ router.post('/conversation/clear', async (req, res) => {
   }
 });
 
+router.post('/conversation/process-message', async (req, res) => {
+  const { 
+    phoneNumber, 
+    content, 
+    role = 'user', 
+    timeWindowMs = 5000, 
+    metadata = null,
+    aggregateOnly = false // If true, only aggregates without storing
+  } = req.body;
+  
+  if (!phoneNumber) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Phone number is required' 
+    });
+  }
+  
+  try {
+    const session = await conversationOps.getOrCreateSession(phoneNumber);
+    if (!session) {
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to get or create session' 
+      });
+    }
+    
+    // Store the current message if content is provided and not aggregateOnly
+    let storedMessage = null;
+    if (content && !aggregateOnly) {
+      storedMessage = await conversationOps.addMessage(
+        session.id, 
+        role, 
+        content, 
+        metadata
+      );
+    }
+    
+    // Get recent messages within the time window for aggregation
+    const cutoffTime = new Date(Date.now() - timeWindowMs);
+    const { data: recentMessages, error } = await supabase
+      .from('conversation_messages')
+      .select('*')
+      .eq('session_id', session.id)
+      .eq('role', 'user')
+      .gt('created_at', cutoffTime.toISOString())
+      .order('created_at', { ascending: true });
+    
+    if (error) {
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to fetch recent messages' 
+      });
+    }
+    
+    // Aggregate messages
+    let aggregatedContent = '';
+    if (recentMessages.length > 0) {
+      aggregatedContent = recentMessages.map(msg => msg.content).join(' ');
+      
+      // Mark all but the last message as processed
+      if (recentMessages.length > 1) {
+        const messageIds = recentMessages.slice(0, -1).map(msg => msg.id);
+        await supabase
+          .from('conversation_messages')
+          .update({ metadata: { ...metadata, processed: true } })
+          .in('id', messageIds);
+      }
+    }
+    
+    // Get conversation history (separate from recent messages)
+    const history = await conversationOps.getConversationHistory(phoneNumber, 10);
+    
+    return res.status(200).json({
+      success: true,
+      storedMessage,
+      aggregatedContent,
+      messageCount: recentMessages.length,
+      recentMessages,
+      conversationHistory: history,
+      sessionId: session.id
+    });
+  } catch (e) {
+    console.error('Error in process-message:', e);
+    return res.status(500).json({ 
+      success: false, 
+      error: e.message 
+    });
+  }
+});
+
 module.exports = router;

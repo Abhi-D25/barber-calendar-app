@@ -547,20 +547,21 @@ router.post('/conversation/clear', async (req, res) => {
   }
 });
 
+// Add this new endpoint to your webhook.js file
+
 router.post('/conversation/process-message', async (req, res) => {
   const { 
     phoneNumber, 
     content, 
     role = 'user', 
-    timeWindowMs = 5000, 
-    metadata = null,
-    aggregateOnly = false // If true, only aggregates without storing
+    timeWindowMs = 5000,  // 5 second window by default
+    metadata = null
   } = req.body;
   
-  if (!phoneNumber) {
+  if (!phoneNumber || !content) {
     return res.status(400).json({ 
       success: false, 
-      error: 'Phone number is required' 
+      error: 'Phone number and content are required' 
     });
   }
   
@@ -573,18 +574,18 @@ router.post('/conversation/process-message', async (req, res) => {
       });
     }
     
-    // Store the current message if content is provided and not aggregateOnly
-    let storedMessage = null;
-    if (content && !aggregateOnly) {
-      storedMessage = await conversationOps.addMessage(
-        session.id, 
-        role, 
-        content, 
-        metadata
-      );
-    }
+    // Store the current message with a timestamp
+    const message = await conversationOps.addMessage(
+      session.id, 
+      role, 
+      content, 
+      { ...metadata, timestamp: Date.now() }
+    );
     
-    // Get recent messages within the time window for aggregation
+    // Wait for the time window to check for additional messages
+    await new Promise(resolve => setTimeout(resolve, timeWindowMs));
+    
+    // Get all messages within the time window
     const cutoffTime = new Date(Date.now() - timeWindowMs);
     const { data: recentMessages, error } = await supabase
       .from('conversation_messages')
@@ -601,35 +602,136 @@ router.post('/conversation/process-message', async (req, res) => {
       });
     }
     
-    // Aggregate messages
-    let aggregatedContent = '';
-    if (recentMessages.length > 0) {
-      aggregatedContent = recentMessages.map(msg => msg.content).join(' ');
-      
-      // Mark all but the last message as processed
-      if (recentMessages.length > 1) {
-        const messageIds = recentMessages.slice(0, -1).map(msg => msg.id);
-        await supabase
-          .from('conversation_messages')
-          .update({ metadata: { ...metadata, processed: true } })
-          .in('id', messageIds);
-      }
+    // Check if this is the final message (no newer messages)
+    const thisMessageTimestamp = new Date(message.created_at).getTime();
+    const hasNewerMessages = recentMessages.some(msg => 
+      new Date(msg.created_at).getTime() > thisMessageTimestamp
+    );
+    
+    if (hasNewerMessages) {
+      // Not the final message
+      return res.status(200).json({
+        success: true,
+        isFinalMessage: false,
+        content: content,
+        sessionId: session.id
+      });
     }
     
-    // Get conversation history (separate from recent messages)
-    const history = await conversationOps.getConversationHistory(phoneNumber, 10);
+    // This is the final message - aggregate all messages
+    const aggregatedContent = recentMessages
+      .map(msg => msg.content)
+      .join(' ');
+    
+    // Mark all messages except the last one as processed
+    if (recentMessages.length > 1) {
+      const messageIds = recentMessages.slice(0, -1).map(msg => msg.id);
+      await supabase
+        .from('conversation_messages')
+        .update({ metadata: { ...metadata, processed: true } })
+        .in('id', messageIds);
+    }
     
     return res.status(200).json({
       success: true,
-      storedMessage,
-      aggregatedContent,
-      messageCount: recentMessages.length,
-      recentMessages,
-      conversationHistory: history,
-      sessionId: session.id
+      isFinalMessage: true,
+      content: aggregatedContent,
+      sessionId: session.id,
+      messageCount: recentMessages.length
     });
   } catch (e) {
     console.error('Error in process-message:', e);
+    return res.status(500).json({ 
+      success: false, 
+      error: e.message 
+    });
+  }
+});
+
+// Add a separate endpoint for checking if a message batch is complete
+router.post('/conversation/check-batch-complete', async (req, res) => {
+  const { phoneNumber, messageId, timeWindowMs = 5000 } = req.body;
+  
+  if (!phoneNumber || !messageId) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Phone number and message ID are required' 
+    });
+  }
+  
+  try {
+    const session = await conversationOps.getOrCreateSession(phoneNumber);
+    
+    // Get the specific message
+    const { data: currentMessage, error: msgError } = await supabase
+      .from('conversation_messages')
+      .select('*')
+      .eq('id', messageId)
+      .single();
+    
+    if (msgError || !currentMessage) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Message not found' 
+      });
+    }
+    
+    // Check for newer messages
+    const { data: newerMessages, error } = await supabase
+      .from('conversation_messages')
+      .select('*')
+      .eq('session_id', session.id)
+      .eq('role', 'user')
+      .gt('created_at', currentMessage.created_at);
+    
+    if (error) {
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to check for newer messages' 
+      });
+    }
+    
+    const isComplete = newerMessages.length === 0;
+    
+    if (isComplete) {
+      // Get all messages in the batch for aggregation
+      const cutoffTime = new Date(
+        new Date(currentMessage.created_at).getTime() - timeWindowMs
+      );
+      
+      const { data: batchMessages, error: batchError } = await supabase
+        .from('conversation_messages')
+        .select('*')
+        .eq('session_id', session.id)
+        .eq('role', 'user')
+        .gt('created_at', cutoffTime.toISOString())
+        .order('created_at', { ascending: true });
+      
+      if (batchError) {
+        return res.status(500).json({ 
+          success: false, 
+          error: 'Failed to fetch batch messages' 
+        });
+      }
+      
+      const aggregatedContent = batchMessages
+        .map(msg => msg.content)
+        .join(' ');
+      
+      return res.status(200).json({
+        success: true,
+        isComplete: true,
+        aggregatedContent,
+        messageCount: batchMessages.length
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      isComplete: false
+    });
+  } catch (e) {
+    console.error('Error in check-batch-complete:', e);
     return res.status(500).json({ 
       success: false, 
       error: e.message 

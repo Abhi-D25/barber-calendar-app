@@ -585,32 +585,28 @@ router.post('/conversation/process-message', async (req, res) => {
     // Wait for the time window to check for additional messages
     await new Promise(resolve => setTimeout(resolve, timeWindowMs));
     
-    // Get all unprocessed messages within the session
+    // Get all messages within the time window
+    const cutoffTime = new Date(Date.now() - timeWindowMs);
     const { data: recentMessages, error } = await supabase
       .from('conversation_messages')
       .select('*')
       .eq('session_id', session.id)
       .eq('role', 'user')
-      .or('metadata.is.null,not.metadata->processed.eq.true')
+      .gte('created_at', cutoffTime.toISOString())
       .order('created_at', { ascending: true });
     
     if (error) {
+      console.error('Error fetching messages:', error);
       return res.status(500).json({ 
         success: false, 
-        error: 'Failed to fetch recent messages' 
+        error: 'Failed to fetch recent messages',
+        details: error.message
       });
     }
     
-    // Find messages within the time window
-    const currentTime = Date.now();
-    const messagesInWindow = recentMessages.filter(msg => {
-      const msgTime = new Date(msg.created_at).getTime();
-      return currentTime - msgTime <= timeWindowMs;
-    });
-    
     // Check if newer messages exist
     const thisMessageId = message.id;
-    const hasNewerMessages = messagesInWindow.some(msg => 
+    const hasNewerMessages = recentMessages.some(msg => 
       msg.id !== thisMessageId && new Date(msg.created_at) > new Date(message.created_at)
     );
     
@@ -624,24 +620,26 @@ router.post('/conversation/process-message', async (req, res) => {
       });
     }
     
-    // Aggregate all messages in the window
-    const aggregatedContent = messagesInWindow
+    // Aggregate all messages including current
+    const aggregatedContent = recentMessages
       .map(msg => msg.content)
       .join(' ');
     
-    // Mark all messages as processed
-    const messageIds = messagesInWindow.map(msg => msg.id);
-    await supabase
-      .from('conversation_messages')
-      .update({ metadata: { ...metadata, processed: true } })
-      .in('id', messageIds);
+    // Mark all messages as processed (if metadata exists)
+    if (recentMessages.length > 0) {
+      const messageIds = recentMessages.map(msg => msg.id);
+      await supabase
+        .from('conversation_messages')
+        .update({ metadata: { processed: true } })
+        .in('id', messageIds);
+    }
     
     return res.status(200).json({
       success: true,
       isFinalMessage: true,
-      content: aggregatedContent,
+      content: aggregatedContent || content,
       sessionId: session.id,
-      messageCount: messagesInWindow.length
+      messageCount: recentMessages.length
     });
   } catch (e) {
     console.error('Error in process-message:', e);

@@ -618,10 +618,13 @@ router.post('/conversation/process-message', async (req, res) => {
       });
     }
     
-    // This is the final message - aggregate all messages
-    const aggregatedContent = recentMessages
-      .map(msg => msg.content)
-      .join(' ');
+    // This is the final message - aggregate all messages or return current if only one
+    let aggregatedContent = content;
+    if (recentMessages.length > 0) {
+      aggregatedContent = recentMessages
+        .map(msg => msg.content)
+        .join(' ');
+    }
     
     // Mark all messages except the last one as processed
     if (recentMessages.length > 1) {
@@ -637,7 +640,7 @@ router.post('/conversation/process-message', async (req, res) => {
       isFinalMessage: true,
       content: aggregatedContent,
       sessionId: session.id,
-      messageCount: recentMessages.length
+      messageCount: recentMessages.length || 1
     });
   } catch (e) {
     console.error('Error in process-message:', e);

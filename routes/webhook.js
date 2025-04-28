@@ -585,14 +585,14 @@ router.post('/conversation/process-message', async (req, res) => {
     // Wait for the time window to check for additional messages
     await new Promise(resolve => setTimeout(resolve, timeWindowMs));
     
-    // Get all messages within the time window
-    const cutoffTime = new Date(Date.now() - timeWindowMs);
+    // Get all messages within the time window including current message
+    const cutoffTime = new Date(Date.now() - (timeWindowMs * 2)); // Double window to ensure we catch all messages
     const { data: recentMessages, error } = await supabase
       .from('conversation_messages')
       .select('*')
       .eq('session_id', session.id)
       .eq('role', 'user')
-      .gt('created_at', cutoffTime.toISOString())
+      .gte('created_at', cutoffTime.toISOString())
       .order('created_at', { ascending: true });
     
     if (error) {
@@ -618,17 +618,14 @@ router.post('/conversation/process-message', async (req, res) => {
       });
     }
     
-    // This is the final message - aggregate all messages or return current if only one
-    let aggregatedContent = content;
-    if (recentMessages.length > 0) {
-      aggregatedContent = recentMessages
-        .map(msg => msg.content)
-        .join(' ');
-    }
+    // This is the final message - aggregate all messages including current
+    const aggregatedContent = recentMessages
+      .map(msg => msg.content)
+      .join(' ');
     
-    // Mark all messages except the last one as processed
-    if (recentMessages.length > 1) {
-      const messageIds = recentMessages.slice(0, -1).map(msg => msg.id);
+    // Mark all messages as processed
+    if (recentMessages.length > 0) {
+      const messageIds = recentMessages.map(msg => msg.id);
       await supabase
         .from('conversation_messages')
         .update({ metadata: { ...metadata, processed: true } })
@@ -638,9 +635,9 @@ router.post('/conversation/process-message', async (req, res) => {
     return res.status(200).json({
       success: true,
       isFinalMessage: true,
-      content: aggregatedContent,
+      content: aggregatedContent || content,
       sessionId: session.id,
-      messageCount: recentMessages.length || 1
+      messageCount: recentMessages.length
     });
   } catch (e) {
     console.error('Error in process-message:', e);

@@ -574,25 +574,24 @@ router.post('/conversation/process-message', async (req, res) => {
       });
     }
     
-    // Store the current message with a timestamp
+    // Store the current message
     const message = await conversationOps.addMessage(
       session.id, 
       role, 
       content, 
-      { ...metadata, timestamp: Date.now() }
+      metadata
     );
     
     // Wait for the time window to check for additional messages
     await new Promise(resolve => setTimeout(resolve, timeWindowMs));
     
-    // Get all messages within the time window including current message
-    const cutoffTime = new Date(Date.now() - (timeWindowMs * 2)); // Double window to ensure we catch all messages
+    // Get all unprocessed messages within the session
     const { data: recentMessages, error } = await supabase
       .from('conversation_messages')
       .select('*')
       .eq('session_id', session.id)
       .eq('role', 'user')
-      .gte('created_at', cutoffTime.toISOString())
+      .or('metadata.is.null,not.metadata->processed.eq.true')
       .order('created_at', { ascending: true });
     
     if (error) {
@@ -602,10 +601,17 @@ router.post('/conversation/process-message', async (req, res) => {
       });
     }
     
-    // Check if this is the final message (no newer messages)
-    const thisMessageTimestamp = new Date(message.created_at).getTime();
-    const hasNewerMessages = recentMessages.some(msg => 
-      new Date(msg.created_at).getTime() > thisMessageTimestamp
+    // Find messages within the time window
+    const currentTime = Date.now();
+    const messagesInWindow = recentMessages.filter(msg => {
+      const msgTime = new Date(msg.created_at).getTime();
+      return currentTime - msgTime <= timeWindowMs;
+    });
+    
+    // Check if newer messages exist
+    const thisMessageId = message.id;
+    const hasNewerMessages = messagesInWindow.some(msg => 
+      msg.id !== thisMessageId && new Date(msg.created_at) > new Date(message.created_at)
     );
     
     if (hasNewerMessages) {
@@ -618,26 +624,24 @@ router.post('/conversation/process-message', async (req, res) => {
       });
     }
     
-    // This is the final message - aggregate all messages including current
-    const aggregatedContent = recentMessages
+    // Aggregate all messages in the window
+    const aggregatedContent = messagesInWindow
       .map(msg => msg.content)
       .join(' ');
     
     // Mark all messages as processed
-    if (recentMessages.length > 0) {
-      const messageIds = recentMessages.map(msg => msg.id);
-      await supabase
-        .from('conversation_messages')
-        .update({ metadata: { ...metadata, processed: true } })
-        .in('id', messageIds);
-    }
+    const messageIds = messagesInWindow.map(msg => msg.id);
+    await supabase
+      .from('conversation_messages')
+      .update({ metadata: { ...metadata, processed: true } })
+      .in('id', messageIds);
     
     return res.status(200).json({
       success: true,
       isFinalMessage: true,
-      content: aggregatedContent || content,
+      content: aggregatedContent,
       sessionId: session.id,
-      messageCount: recentMessages.length
+      messageCount: messagesInWindow.length
     });
   } catch (e) {
     console.error('Error in process-message:', e);

@@ -586,7 +586,8 @@ router.post('/conversation/process-message', async (req, res) => {
     await new Promise(resolve => setTimeout(resolve, timeWindowMs));
     
     // Get all messages within the time window
-    const cutoffTime = new Date(Date.now() - timeWindowMs);
+    // NOTE: We need to account for the fact that we already waited for timeWindowMs
+    const cutoffTime = new Date(Date.now() - (timeWindowMs * 2));
     const { data: recentMessages, error } = await supabase
       .from('conversation_messages')
       .select('*')
@@ -603,6 +604,10 @@ router.post('/conversation/process-message', async (req, res) => {
         details: error.message
       });
     }
+    
+    console.log('Found messages:', recentMessages.length);
+    console.log('Current message ID:', message.id);
+    console.log('Messages:', recentMessages.map(m => ({ id: m.id, content: m.content, created_at: m.created_at })));
     
     // Check if newer messages exist
     const thisMessageId = message.id;
@@ -649,6 +654,7 @@ router.post('/conversation/process-message', async (req, res) => {
     });
   }
 });
+
 
 // Add a separate endpoint for checking if a message batch is complete
 router.post('/conversation/check-batch-complete', async (req, res) => {

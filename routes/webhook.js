@@ -253,37 +253,63 @@ router.post('/update-client-preference', async (req, res) => {
 });
 
 router.post('/check-availability', async (req, res) => {
-  const { barberPhoneNumber, barberId, startDateTime, endDateTime } = req.body;
+  const { barberPhoneNumber, barberId, startDateTime, endDateTime, serviceDuration = 30 } = req.body;
+  
   if (!barberPhoneNumber && !barberId) return res.status(400).json({ success: false, error: 'Barber identifier required' });
+  
   try {
     const barber = barberPhoneNumber ? await barberOps.getByPhoneNumber(barberPhoneNumber) : (await supabase.from('barbers').select('*').eq('id', barberId).single()).data;
     if (!barber?.refresh_token) return res.status(404).json({ success: false, error: 'Barber not found or unauthorized' });
+    
     const oauth2Client = createOAuth2Client(barber.refresh_token);
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
     const calendarId = barber.selected_calendar_id || 'primary';
 
-    // Use input datetimes directly, assuming they include timezone offset
-    const timeMin = new Date(startDateTime).toISOString();
-    const timeMax = new Date(endDateTime).toISOString();
+    // Parse specific start time from request
+    const requestedStart = new Date(startDateTime);
+    
+    // Calculate the end time based on service duration
+    const requestedEnd = new Date(requestedStart.getTime() + (serviceDuration * 60000));
+    
+    // Use a wider time window to fetch all potentially conflicting events
+    const timeMin = new Date(requestedStart.getTime() - (60 * 60000)); // 1 hour before
+    const timeMax = new Date(requestedEnd.getTime() + (60 * 60000));   // 1 hour after
 
     const response = await calendar.events.list({
       calendarId,
-      timeMin,
-      timeMax,
+      timeMin: timeMin.toISOString(),
+      timeMax: timeMax.toISOString(),
       timeZone: 'America/Los_Angeles',
       singleEvents: true,
       orderBy: 'startTime',
       maxResults: 100
     });
 
+    // Check if any existing events overlap with the requested time slot
+    const isAvailable = !response.data.items.some(event => {
+      const eventStart = new Date(event.start.dateTime || event.start.date);
+      const eventEnd = new Date(event.end.dateTime || event.end.date);
+      
+      // Check for overlap - if either the start or end time falls within an existing event
+      return (
+        (requestedStart < eventEnd && requestedEnd > eventStart) ||
+        (eventStart < requestedEnd && eventEnd > requestedStart)
+      );
+    });
+    
     // Set the correct content type explicitly
     res.setHeader('Content-Type', 'application/json');
     
     // Send a clean, simplified response structure
     const result = {
       success: true,
-      isAvailable: response.data.items.length === 0,
-      events: response.data.items.map(event => ({
+      isAvailable: isAvailable,
+      requestedTimeSlot: {
+        start: requestedStart.toISOString(),
+        end: requestedEnd.toISOString(),
+        duration: serviceDuration
+      },
+      conflictingEvents: isAvailable ? [] : response.data.items.map(event => ({
         id: event.id,
         summary: event.summary || "Untitled",
         start: event.start?.dateTime || event.start?.date,
@@ -291,7 +317,6 @@ router.post('/check-availability', async (req, res) => {
       }))
     };
     
-    // Use res.send with JSON.stringify to ensure proper formatting
     return res.send(JSON.stringify(result));
   } catch (e) {
     res.setHeader('Content-Type', 'application/json');

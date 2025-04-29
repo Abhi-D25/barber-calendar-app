@@ -87,7 +87,7 @@ async function handleCancelAppointment(calendar, calendarId, eventId, clientPhon
 }
 
 async function handleRescheduleAppointment(calendar, calendarId, data, res) {
-  const { eventId, newStartDateTime, clientPhone, clientName, serviceType, duration, notes, barberId } = data;
+  const { eventId, newStartDateTime, clientPhone, clientName, serviceType, duration = 30, notes, barberId } = data;
   
   if (!eventId || !newStartDateTime) {
     return res.status(400).json({ 
@@ -111,6 +111,7 @@ async function handleRescheduleAppointment(calendar, calendarId, data, res) {
     }
 
     // Parse new start time and calculate new end time
+    // Use the provided duration (which might be different from original)
     const newStartTime = parsePacificDateTime(newStartDateTime);
     const newEndTime = new Date(newStartTime.getTime() + (duration * 60000));
 
@@ -120,6 +121,7 @@ async function handleRescheduleAppointment(calendar, calendarId, data, res) {
       eventId,
       resource: {
         ...existingEvent.data,
+        summary: serviceType ? `${serviceType}: ${clientName}` : existingEvent.data.summary,
         start: { dateTime: newStartTime.toISOString(), timeZone: 'America/Los_Angeles' },
         end: { dateTime: newEndTime.toISOString(), timeZone: 'America/Los_Angeles' }
       },
@@ -129,7 +131,8 @@ async function handleRescheduleAppointment(calendar, calendarId, data, res) {
     // Update the appointment in the database
     const updateResult = await appointmentOps.updateByEventId(eventId, {
       start_time: newStartTime.toISOString(),
-      end_time: newEndTime.toISOString()
+      end_time: newEndTime.toISOString(),
+      service_type: serviceType || undefined // Only update if provided
     });
 
     return res.status(200).json({

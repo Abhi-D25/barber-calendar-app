@@ -412,7 +412,7 @@ async function findNextAvailableSlots(calendar, calendarId, startFrom, numSlots 
 
 // New endpoint: POST /find-available-slots
 router.post('/find-available-slots', async (req, res) => {
-  const { barberId, currentTimestamp, numSlots = 3 } = req.body;
+  const { barberId, currentTimestamp, numSlots = 3, slotDurationMinutes = 30 } = req.body;
 
   if (!barberId || !currentTimestamp) {
     return res.status(400).json({ success: false, error: 'Missing barberId or currentTimestamp' });
@@ -428,12 +428,14 @@ router.post('/find-available-slots', async (req, res) => {
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
     const calendarId = barber.selected_calendar_id || 'primary';
 
-    const slots = await findNextAvailableSlots(calendar, calendarId, currentTimestamp, numSlots);
+    // Pass the slotDurationMinutes parameter here
+    const slots = await findNextAvailableSlots(calendar, calendarId, currentTimestamp, numSlots, slotDurationMinutes);
 
     return res.status(200).json({
       success: true,
       slotsFound: slots.length,
-      slots
+      slots,
+      duration: slotDurationMinutes // Return the duration for clarity
     });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });

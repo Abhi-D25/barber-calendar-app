@@ -1101,4 +1101,55 @@ router.post('/clear-temp-messages', async (req, res) => {
   }
 });
 
+// Look up barber ID by name
+router.get('/lookup-barber-id', async (req, res) => {
+  const { barberName } = req.query;
+  
+  if (!barberName) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Barber name is required' 
+    });
+  }
+  
+  try {
+    // Search for barber with similar name (case insensitive)
+    const { data, error } = await supabase
+      .from('barbers')
+      .select('id, name, phone_number')
+      .ilike('name', `%${barberName}%`)
+      .limit(1);
+    
+    if (error) {
+      console.error('Error looking up barber:', error);
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to look up barber',
+        details: error.message
+      });
+    }
+    
+    if (!data || data.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No barber found with that name',
+        barberName
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      barber: data[0],
+      barberId: data[0].id,
+      barberName: data[0].name
+    });
+  } catch (e) {
+    console.error('Error in lookup-barber-id:', e);
+    return res.status(500).json({ 
+      success: false, 
+      error: e.message 
+    });
+  }
+});
+
 module.exports = router;

@@ -857,7 +857,7 @@ router.get('/check-temp-messages', async (req, res) => {
       .from('conversation_messages')
       .select('*')
       .eq('session_id', session.id)
-      .is('metadata->>is_temp', 'true')
+      .filter('metadata->is_temp', 'eq', true)  // Changed this line
       .order('created_at', { ascending: false })
       .limit(1);
     
@@ -986,7 +986,7 @@ router.post('/clear-temp-messages', async (req, res) => {
         metadata: { is_temp: false }
       })
       .eq('session_id', session.id)
-      .is('metadata->>is_temp', 'true');
+      .filter('metadata->is_temp', 'eq', true);  // Changed this line
     
     if (error) {
       console.error('Error clearing temp messages:', error);

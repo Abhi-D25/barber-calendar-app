@@ -777,8 +777,9 @@ router.post('/conversation/check-batch-complete', async (req, res) => {
   }
 });
 
+// Store temporary messages as a conversation
 router.post('/store-temp-messages', async (req, res) => {
-  const { phoneNumber, messages, content } = req.body;
+  const { phoneNumber, role = "user", messages, content } = req.body;
   
   if (!phoneNumber) {
     return res.status(400).json({ 
@@ -797,16 +798,89 @@ router.post('/store-temp-messages', async (req, res) => {
       });
     }
     
-    // Store as a temp message
-    const { data, error } = await supabase
+    // Get the most recent message with temp_messages
+    const { data: existingData, error: fetchError } = await supabase
       .from('conversation_messages')
-      .update({ 
-        temp_messages: messages || content,
-        metadata: { is_temp: true }
-      })
+      .select('*')
       .eq('session_id', session.id)
+      .filter('metadata->is_temp', 'eq', true)
       .order('created_at', { ascending: false })
       .limit(1);
+    
+    if (fetchError) {
+      console.error('Error fetching existing temp messages:', fetchError);
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to fetch existing temp messages',
+        details: fetchError.message
+      });
+    }
+    
+    // Initialize conversation array
+    let conversation = [];
+    
+    // If we have existing data, use it as the base
+    if (existingData && existingData.length > 0 && existingData[0].temp_messages) {
+      if (Array.isArray(existingData[0].temp_messages)) {
+        conversation = existingData[0].temp_messages;
+      } else {
+        // If it's not an array, initialize with a single entry
+        conversation = [{ role: "system", content: "Conversation initialized" }];
+      }
+    } else {
+      // Start a new conversation
+      conversation = [{ role: "system", content: "Conversation initialized" }];
+    }
+    
+    // Add the new message to the conversation
+    if (content || messages) {
+      // If it's a direct content string, add it as a message
+      if (content) {
+        conversation.push({
+          role: role,
+          content: content
+        });
+      } 
+      // If it's a messages object, add it
+      else if (messages) {
+        if (typeof messages === 'string') {
+          conversation.push({
+            role: role,
+            content: messages
+          });
+        } else {
+          // If it's already an object or array, try to handle it intelligently
+          if (Array.isArray(messages)) {
+            // If it's an array, append all messages
+            conversation = [...conversation, ...messages];
+          } else if (messages.content) {
+            // If it has content, treat as a single message
+            conversation.push({
+              role: messages.role || role,
+              content: messages.content
+            });
+          } else {
+            // Fallback: just stringify and store
+            conversation.push({
+              role: role,
+              content: JSON.stringify(messages)
+            });
+          }
+        }
+      }
+    }
+    
+    // Store the updated conversation
+    const { data, error } = await supabase
+      .from('conversation_messages')
+      .upsert({ 
+        session_id: session.id,
+        role: 'system', // This is a system message to store the temp conversation
+        content: 'Temporary conversation storage',
+        temp_messages: conversation,
+        metadata: { is_temp: true },
+        created_at: new Date().toISOString() // Use current timestamp
+      });
     
     if (error) {
       console.error('Error storing temp messages:', error);
@@ -820,7 +894,8 @@ router.post('/store-temp-messages', async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'Temporary messages stored successfully',
-      sessionId: session.id
+      sessionId: session.id,
+      conversationLength: conversation.length
     });
   } catch (e) {
     console.error('Error in store-temp-messages:', e);
@@ -831,7 +906,7 @@ router.post('/store-temp-messages', async (req, res) => {
   }
 });
 
-// Check temporary messages - this will be used as a tool in the AI Agent
+// Check temporary messages - formatted for OpenAI context
 router.get('/check-temp-messages', async (req, res) => {
   const { phoneNumber } = req.query;
   
@@ -857,7 +932,7 @@ router.get('/check-temp-messages', async (req, res) => {
       .from('conversation_messages')
       .select('*')
       .eq('session_id', session.id)
-      .filter('metadata->is_temp', 'eq', true)  // Changed this line
+      .filter('metadata->is_temp', 'eq', true)
       .order('created_at', { ascending: false })
       .limit(1);
     
@@ -870,12 +945,28 @@ router.get('/check-temp-messages', async (req, res) => {
       });
     }
     
-    const tempMessages = data && data.length > 0 ? data[0].temp_messages : null;
+    // Format the conversation for easy reading
+    let formattedConversation = '';
+    let rawConversation = [];
+    
+    if (data && data.length > 0 && data[0].temp_messages) {
+      rawConversation = data[0].temp_messages;
+      
+      // Skip the first system message in formatting
+      for (let i = 1; i < rawConversation.length; i++) {
+        const msg = rawConversation[i];
+        if (msg.role && msg.content) {
+          // Add a formatted line to the conversation
+          formattedConversation += `${msg.role.toUpperCase()}: ${msg.content}\n\n`;
+        }
+      }
+    }
     
     return res.status(200).json({
       success: true,
-      tempMessages,
-      hasMessages: !!tempMessages
+      conversation: formattedConversation.trim(),
+      rawConversation: rawConversation,
+      hasMessages: rawConversation.length > 1 // More than just the system message
     });
   } catch (e) {
     console.error('Error in check-temp-messages:', e);

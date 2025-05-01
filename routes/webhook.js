@@ -777,4 +777,237 @@ router.post('/conversation/check-batch-complete', async (req, res) => {
   }
 });
 
+router.post('/store-temp-messages', async (req, res) => {
+  const { phoneNumber, messages, content } = req.body;
+  
+  if (!phoneNumber) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Phone number is required' 
+    });
+  }
+  
+  try {
+    // Get or create session
+    const session = await conversationOps.getOrCreateSession(phoneNumber);
+    if (!session) {
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to get or create session' 
+      });
+    }
+    
+    // Store as a temp message
+    const { data, error } = await supabase
+      .from('conversation_messages')
+      .update({ 
+        temp_messages: messages || content,
+        metadata: { is_temp: true }
+      })
+      .eq('session_id', session.id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    
+    if (error) {
+      console.error('Error storing temp messages:', error);
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to store temporary messages',
+        details: error.message
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Temporary messages stored successfully',
+      sessionId: session.id
+    });
+  } catch (e) {
+    console.error('Error in store-temp-messages:', e);
+    return res.status(500).json({ 
+      success: false, 
+      error: e.message 
+    });
+  }
+});
+
+// Check temporary messages - this will be used as a tool in the AI Agent
+router.get('/check-temp-messages', async (req, res) => {
+  const { phoneNumber } = req.query;
+  
+  if (!phoneNumber) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Phone number is required' 
+    });
+  }
+  
+  try {
+    // Get the session
+    const session = await conversationOps.getOrCreateSession(phoneNumber);
+    if (!session) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Session not found' 
+      });
+    }
+    
+    // Get the most recent message with temp_messages
+    const { data, error } = await supabase
+      .from('conversation_messages')
+      .select('*')
+      .eq('session_id', session.id)
+      .is('metadata->>is_temp', 'true')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    
+    if (error) {
+      console.error('Error checking temp messages:', error);
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to check temporary messages',
+        details: error.message
+      });
+    }
+    
+    const tempMessages = data && data.length > 0 ? data[0].temp_messages : null;
+    
+    return res.status(200).json({
+      success: true,
+      tempMessages,
+      hasMessages: !!tempMessages
+    });
+  } catch (e) {
+    console.error('Error in check-temp-messages:', e);
+    return res.status(500).json({ 
+      success: false, 
+      error: e.message 
+    });
+  }
+});
+
+// Create a new client
+router.post('/create-client', async (req, res) => {
+  const { 
+    phoneNumber, 
+    name = "New Client", 
+    preferredBarberId 
+  } = req.body;
+  
+  if (!phoneNumber) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Phone number is required' 
+    });
+  }
+  
+  try {
+    // Format phone number
+    let formattedPhone = phoneNumber;
+    const digits = formattedPhone.replace(/\D/g, '');
+    if (!formattedPhone.startsWith('+')) {
+      formattedPhone = digits.length === 10 ? `+1${digits}` : `+${digits}`;
+    }
+    
+    // Check if the client already exists
+    const existingClient = await clientOps.getByPhoneNumber(formattedPhone);
+    
+    if (existingClient) {
+      // Update client if it exists
+      const updatedClient = await clientOps.createOrUpdate({
+        phone_number: formattedPhone,
+        name,
+        preferred_barber_id: preferredBarberId || existingClient.preferred_barber_id
+      });
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Client information updated',
+        client: updatedClient,
+        isNew: false
+      });
+    }
+    
+    // Create a new client
+    const newClient = await clientOps.createOrUpdate({
+      phone_number: formattedPhone,
+      name,
+      preferred_barber_id: preferredBarberId
+    });
+    
+    if (!newClient) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to create client'
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      message: 'New client created successfully',
+      client: newClient,
+      isNew: true
+    });
+  } catch (e) {
+    console.error('Error in create-client:', e);
+    return res.status(500).json({ 
+      success: false, 
+      error: e.message 
+    });
+  }
+});
+
+// Clear temporary messages
+router.post('/clear-temp-messages', async (req, res) => {
+  const { phoneNumber } = req.body;
+  
+  if (!phoneNumber) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Phone number is required' 
+    });
+  }
+  
+  try {
+    // Get the session
+    const session = await conversationOps.getOrCreateSession(phoneNumber);
+    if (!session) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Session not found' 
+      });
+    }
+    
+    // Clear temp messages
+    const { data, error } = await supabase
+      .from('conversation_messages')
+      .update({ 
+        temp_messages: null,
+        metadata: { is_temp: false }
+      })
+      .eq('session_id', session.id)
+      .is('metadata->>is_temp', 'true');
+    
+    if (error) {
+      console.error('Error clearing temp messages:', error);
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Failed to clear temporary messages',
+        details: error.message
+      });
+    }
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Temporary messages cleared successfully'
+    });
+  } catch (e) {
+    console.error('Error in clear-temp-messages:', e);
+    return res.status(500).json({ 
+      success: false, 
+      error: e.message 
+    });
+  }
+});
+
 module.exports = router;
